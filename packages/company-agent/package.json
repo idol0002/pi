@@ -1,0 +1,23 @@
+{
+	"name": "@company/knowledge-agent",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Internal knowledge agent application",
+	"type": "module",
+	"scripts": {
+		"start": "node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env src/main.ts",
+		"dev": "node --watch --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env src/main.ts",
+		"test:api": "node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env --test --test-concurrency=1 test/server.test.ts test/database.test.ts test/documents.test.ts test/documents-rich.test.ts test/document-parser.test.ts test/text-processing.test.ts test/chat.test.ts test/model.test.ts test/web.test.ts",
+		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.web.json",
+		"lint": "biome check src test web"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "^1.1.0",
+		"@earendil-works/pi-ai": "^1.1.0",
+		"@electric-sql/pglite": "0.5.8",
+		"pdfjs-dist": "6.4.299"
+	}
+}
