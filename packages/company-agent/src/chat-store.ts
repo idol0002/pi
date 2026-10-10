@@ -4,7 +4,7 @@ import type { AnswerEvidence } from "./answer-model.ts";
 import type { SqlClient } from "./database.ts";
 import { ApiError, notFound } from "./errors.ts";
 import { accessibleKnowledgeBases, documentAccess } from "./store.ts";
-import type { AnswerSource, ChatMessage, Conversation, MessageStatus, ModelUsage } from "./types.ts";
+import type { AnswerSource, ChatMessage, Conversation, MessageStatus, ModelUsage, RetrievalInfo } from "./types.ts";
 
 export interface StoredMessage extends ChatMessage {
 	evidence: AnswerEvidence[];
@@ -121,7 +121,7 @@ export class ChatStore {
 				Omit<ChatMessage, "createdAt" | "redacted" | "sources"> & { createdAt: Date; sourceCount: number }
 			>(
 				`SELECT m.id, m.run_id AS "runId", m.role, m.content, m.status, m.model, m.usage,
-				        m.error_code AS "errorCode", m.created_at AS "createdAt",
+				        m.error_code AS "errorCode", m.created_at AS "createdAt", m.retrieval,
 				        (SELECT count(*)::int FROM message_sources s WHERE s.message_id = m.id) AS "sourceCount"
 				 FROM messages m WHERE m.conversation_id = $1 ORDER BY m.position`,
 				[conversationId],
@@ -157,6 +157,7 @@ export class ChatStore {
 				return {
 					...message,
 					content: redacted ? "" : message.content,
+					retrieval: redacted ? null : message.retrieval,
 					createdAt: createdAt.toISOString(),
 					redacted,
 					evidence,
@@ -176,6 +177,7 @@ export class ChatStore {
 		usage: ModelUsage | null,
 		evidence: AnswerEvidence[],
 		cited: Set<number>,
+		retrieval?: RetrievalInfo,
 	): Promise<void> {
 		return this.database.transaction(async (transaction) => {
 			await requireConversation(transaction, userId, conversationId);
@@ -188,8 +190,13 @@ export class ChatStore {
 				);
 			}
 			await transaction.query(
-				"UPDATE messages SET content = $2, usage = $3, status = 'complete' WHERE id = $1 AND status = 'running'",
-				[messageId, content, usage === null ? null : JSON.stringify(usage)],
+				"UPDATE messages SET content = $2, usage = $3, retrieval = $4, status = 'complete' WHERE id = $1 AND status = 'running'",
+				[
+					messageId,
+					content,
+					usage === null ? null : JSON.stringify(usage),
+					retrieval ? JSON.stringify(retrieval) : null,
+				],
 			);
 			await transaction.query("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [
 				conversationId,

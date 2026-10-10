@@ -20,6 +20,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; }
+output { display: block; }
 [hidden] { display: none !important; }
 button, input, select, textarea { font: inherit; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
@@ -195,6 +196,7 @@ tr:last-child td { border-bottom: 0; }
 .source-pdf-stage canvas { display: block; width: 100%; height: auto; }
 .source-review { padding: 24px; border-top: 1px solid var(--border); }
 .source-review-blocks { display: grid; gap: 8px; margin: 16px 0; }
+.source-review-block { display: grid; gap: 8px; }
 .source-review-blocks label { font-size: 12px; color: var(--muted); }
 .source-review-blocks textarea { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; resize: vertical; line-height: 1.7; }
 .review-confirm { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 16px; line-height: 1.7; }

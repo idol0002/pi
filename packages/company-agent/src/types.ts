@@ -174,6 +174,20 @@ export interface SearchRequest {
 	limit?: number;
 }
 
+export interface RetrievalInfo {
+	method: "keyword" | "hybrid";
+	contextual: boolean;
+	durationMs: number;
+	keywordCandidates: number;
+	semanticCandidates: number;
+	note?: string;
+}
+
+export interface SearchResult extends RetrievalInfo {
+	query: string;
+	hits: SearchHit[];
+}
+
 export interface Conversation {
 	id: string;
 	title: string;
@@ -218,6 +232,7 @@ export interface ChatMessage {
 	redacted: boolean;
 	sources: AnswerSource[];
 	createdAt: string;
+	retrieval?: RetrievalInfo | null;
 }
 
 export interface ModelInfo {
@@ -232,7 +247,7 @@ export interface UserGroup {
 
 export type ChatEvent =
 	| { type: "start"; runId: string; messageId: string }
-	| { type: "status"; stage: "retrieving" | "answering"; sourceCount?: number }
+	| { type: "status"; stage: "retrieving" | "answering"; sourceCount?: number; note?: string }
 	| { type: "delta"; text: string }
 	| { type: "sources"; sources: AnswerSource[] }
 	| { type: "done"; message: ChatMessage }

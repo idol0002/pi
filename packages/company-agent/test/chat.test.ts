@@ -225,6 +225,21 @@ describe("grounded knowledge chat", { concurrency: false }, () => {
 		assert.equal(result.usage, null);
 	});
 
+	it("retrieves an uncited section for a topic-free follow-up and records retrieval diagnostics", async () => {
+		const created = await conversation();
+		await upload("# 差旅报销申请\n提交发票和差旅说明。\n\n## 审批时限\n审批在 5 个工作日内完成。");
+		completed(await events(await ask(created.id, "如何申请差旅报销？")));
+		const answer = completed(await events(await ask(created.id, "那多久能批？")));
+		assert.match(answer.content, /5 个工作日/);
+		assert.equal(answer.retrieval?.contextual, true);
+		assert.equal(answer.retrieval?.method, "keyword");
+		assert.ok((answer.retrieval?.durationMs ?? -1) >= 0);
+		const before = inputs.length;
+		const unrelated = completed(await events(await ask(created.id, "明天火星天气")));
+		assert.equal(inputs.length, before);
+		assert.deepEqual(unrelated.sources, []);
+	});
+
 	it("isolates ownership, model scopes and group administration, and rejects forged question fields", async () => {
 		const created = await conversation();
 		assert.equal((await ask(created.id, "上线", bob)).status, 404);

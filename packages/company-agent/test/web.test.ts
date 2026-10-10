@@ -19,31 +19,30 @@ const message: ChatMessage = {
 	createdAt: "2026-01-01T00:00:00.000Z",
 };
 
-it("serves a fixed asset allowlist and browser modules that parse after type stripping", async () => {
+it("serves a fixed asset allowlist with a self-contained React bundle and local PDF assets", async () => {
 	const assets = await loadWebAssets();
 	assert.deepEqual([...assets.keys()].filter((path) => !path.startsWith("/assets/pdf")).sort(), [
 		"/",
-		"/assets/app.ts",
-		"/assets/client.ts",
-		"/assets/document-viewer.ts",
-		"/assets/stream.ts",
+		"/assets/app.js",
 		"/assets/styles.css",
 	]);
-	assert.match(String(assets.get("/")?.content ?? ""), /id="login-form"/);
-	assert.match(String(assets.get("/")?.content ?? ""), /id="question-form"/);
+	assert.match(String(assets.get("/")?.content ?? ""), /id="root"/);
+	assert.match(String(assets.get("/")?.content ?? ""), /type="module" src="\/assets\/app.js"/);
 	assert.equal(assets.get("/assets/pdf.mjs")?.contentType, "text/javascript; charset=utf-8");
 	assert.equal(assets.get("/assets/pdfjs/wasm/openjpeg.wasm")?.contentType, "application/wasm");
 	assert.ok(assets.has("/assets/pdf.worker.mjs"));
-	assert.match(String(assets.get("/assets/document-viewer.ts")?.content), /from "\/assets\/pdf.mjs"/);
+	const script = assets.get("/assets/app.js");
+	assert.equal(script?.contentType, "text/javascript; charset=utf-8");
+	assert.match(String(script?.content), /createRoot/);
+	assert.match(String(script?.content), /from\s*["']\/assets\/pdf.mjs["']/);
+	assert.doesNotMatch(String(script?.content), /from\s*["'](?:react|react-dom)(?:\/[^"']*)?["']/);
 	assert.equal(assets.has("/../.env"), false);
-	for (const [path, asset] of assets) {
-		if (!path.endsWith(".ts")) continue;
-		const checked = spawnSync(process.execPath, ["--input-type=module", "--check"], {
-			input: asset.content,
-			encoding: "utf8",
-		});
-		assert.equal(checked.status, 0, checked.stderr);
-	}
+	assert.equal(assets.has("/assets/app.ts"), false);
+	const checked = spawnSync(process.execPath, ["--input-type=module", "--check"], {
+		input: script?.content,
+		encoding: "utf8",
+	});
+	assert.equal(checked.status, 0, checked.stderr);
 });
 
 it("decodes fragmented UTF-8 and CRLF SSE frames without losing citations or terminal state", async () => {

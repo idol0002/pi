@@ -1,6 +1,6 @@
 # 公司知识库 Agent：网页与带来源问答
 
-已实现同源网页、测试账号登录、知识库授权、PDF／Word／Markdown／TXT 上传、本地扫描件 OCR、正文复核、后台分块与关键词检索，以及通过 Pi 接入的流式问答、版本引用、历史会话和取消生成。提供无需密钥的演示模式及通用 OpenAI 兼容接口。向量检索和真实模型试点仍见[实施清单](../../docs/internal-knowledge-agent-mvp.md)。
+已实现同源网页、测试账号登录、知识库授权、PDF／Word／Markdown／TXT 上传、本地扫描件 OCR、正文复核、后台分块、关键词排序与可选向量混合检索，以及通过 Pi 接入的流式问答、版本引用、追问检索、历史会话和取消生成。提供无需密钥的演示配置、通用 OpenAI 兼容生成／向量接口，以及可重复运行的检索评测。真实模型试点仍见[实施清单](../../docs/internal-knowledge-agent-mvp.md)。
 
 本阶段使用 PGlite 在本机持久化 PostgreSQL 数据，不需要启动 Docker 或数据库服务。原件字节、解析正文、分块、索引和任务状态都保存在这个私有数据库中。应用仅监听 `127.0.0.1`，一个数据目录只能由一个应用进程使用。正式部署时需要接入公司身份系统、独立 PostgreSQL 服务和私有对象存储。
 
@@ -21,7 +21,7 @@ npm --prefix packages/company-agent start
 
 也可以复制本目录的 `.env.example` 为 `.env`，填写密码后运行启动命令。密码需为 12～256 个字符，应用不会提供默认密码，也不会输出密码。
 
-默认网页地址为 `http://127.0.0.1:4310`，健康检查为 `GET /healthz`。启动后直接在浏览器访问该地址。网页由同一服务提供，无需额外的前端开发服务器或构建命令。
+默认网页地址为 `http://127.0.0.1:4310`，健康检查为 `GET /healthz`。启动后直接在浏览器访问该地址。前端采用 React 19 + TypeScript，由同一服务在启动时通过 esbuild 打包并提供，无需额外的前端开发服务器或构建命令。React、PDF.js 和页面资源均来自本地依赖。修改 `web/` 源码后重启服务并刷新页面。
 
 - `KNOWLEDGE_PORT`：本地端口，默认 `4310`。
 - `KNOWLEDGE_DATA_DIR`：数据目录；默认是仓库根目录下的 `.artifacts/company-agent/pgdata`，已被 Git 忽略。自定义相对路径相对于启动时的工作目录，推荐设置绝对路径。
@@ -45,7 +45,7 @@ npm --prefix packages/company-agent start
 3. 可停止正在生成的回答，也可打开自己的历史问答继续提问。会话创建后固定知识范围，切换范围时新建问答。
 4. 「知识管理」中可上传资料、查看后台处理状态、更新版本、重试失败任务或删除文档。拥有管理权限时，还可按用户组调整授权；阅读权限不显示维护和授权操作。
 
-默认的演示模式会在页面和回答中明确标注，只摘录检索到的真实文档，不调用外部模型、不产生模型费用。账号权限、上传、检索、引用和历史保存均使用实际后端。
+默认配置为生成模型 `demo`、向量模型 `off`，会在页面和回答中明确标注，只摘录检索到的真实文档，不调用外部模型。账号权限、上传、检索、引用和历史保存均使用实际后端。单独启用向量模型后，文档索引与问题向量化会调用配置的服务，即使回答仍为演示模式。
 
 ## 模型配置
 
@@ -73,12 +73,14 @@ KNOWLEDGE_MODEL_API_KEY=replace-with-your-key
 
 ## 问答与历史规则
 
-- 后端先在会话的授权范围内执行关键词检索，再向模型提供带编号的资料。无资料时直接说明缺少依据；检索故障作为错误返回。
+- 后端在会话的授权范围内检索，按查询词覆盖度、标题、章节和问题意图重新排序，去除重复摘录并为不同来源预留位置。启用向量后合并两路排名。无资料时说明缺少依据；检索故障作为错误返回。
+- “那多久能批”一类省略主题的追问，会使用最近一轮仍有权限且版本有效的问题及来源补全检索。新主题独立检索；没有新结果的独立问题不会仅凭旧会话片段强行回答。这是启发式补全，需要用业务问题集继续验证。
 - 单个问题最多 2000 字符；检索查询限制为 300 字符、64 个词，最多返回 6 个当前版本片段。结合最近两轮有效历史后，资料最多 10 段、12000 字符，历史正文最多 6000 字符。旧版本回答可继续阅读，但不会作为新一轮问答的当前依据。
 - 每次使用独立 Agent，不注册文件、Shell 或外部执行工具。文档和历史以资料形式传入，不能改变服务端权限范围。正文只按纯文本显示，不执行文档或模型返回的 HTML。
 - 每个会话最多 100 轮，每个员工同时最多一个生成任务，本机总计最多四个。同一会话的重复请求返回 `409`，其他并发超限返回 `429`。
 - 文本增量属于待验证回答。完成时检查引用编号，只映射服务器提供的真实来源；无效引用、非拒答但没有引用、空回答和超长回答均作为失败。引用校验不等于事实正确性验证，仍需核对原文。
 - 保存问题、完成状态、答案和服务返回的令牌用量。所有传入上下文的来源都保留关联，包括没有在最终答案中引用的历史来源；因此删除或撤权后，不会通过后续答案再次带出旧资料。
+- 完成的回答保存 `retrieval` 信息：检索方式、是否使用追问上下文、检索耗时和候选数量。索引更新期间的关键词检索提示会随回答保留。引用编号校验仍不代表事实核验。
 - 每次读取历史、向模型提供资料及推送文本前重新检查访问权限和登录状态。资料被删除后，相关历史回答及引用被遮蔽；整个会话的知识库权限撤销后，该会话不再可见。
 - 点击停止、浏览器断开或超时会取消本次生成。未完成正文不用于后续上下文；重启将中断状态改为失败，不自动重放付费请求。
 
@@ -129,7 +131,43 @@ if ($result.hits.Count -gt 0) {
 
 `POST /api/search` 的 `query` 为 1～300 个字符，最多生成 64 个检索词；`limit` 默认为 5，最大为 20。省略 `knowledgeBaseIds` 时搜索当前员工全部获授权的知识库；提供时必须是 1～20 个不重复且有权访问的知识库。无结果返回空的 `hits` 数组，查询故障返回错误。
 
-关键词索引使用 PostgreSQL `tsvector` 和 GIN 索引。中英文使用同一套分词逻辑，英文忽略大小写和全半角差异；中文加入相邻双字词，降低分词边界不同造成的漏检。按词匹配后排序，标题和章节权重高于正文。当前检索不能理解语义相近但用词不同的问题，试点质量仍需用真实问题集验证。
+关键词索引使用 PostgreSQL `tsvector` 和 GIN 索引。中英文使用同一套分词逻辑，英文忽略大小写和全半角差异；中文加入相邻双字词。查询会过滤常见问句虚词，并按有效词覆盖、标题和章节匹配重排候选。仅使用关键词仍可能漏掉不同措辞的同义问题，可按下一节启用向量检索。
+
+## 向量模型配置
+
+生成模型与向量模型分别配置。在本地 `.env` 填写以下位置，并将模式改为 `openai` 后重启：
+
+```dotenv
+KNOWLEDGE_EMBEDDING_MODE=openai
+KNOWLEDGE_EMBEDDING_BASE_URL=https://your-approved-gateway.example/v1
+KNOWLEDGE_EMBEDDING_NAME=your-embedding-model
+KNOWLEDGE_EMBEDDING_API_KEY=your-key
+KNOWLEDGE_EMBEDDING_DIMENSIONS=
+KNOWLEDGE_EMBEDDING_TIMEOUT_MS=10000
+KNOWLEDGE_EMBEDDING_MIN_SIMILARITY=0.35
+KNOWLEDGE_EMBEDDING_REVISION=1
+```
+
+`BASE_URL` 是根地址，不包含 `/embeddings`。需要支持 OpenAI 格式的批量 `input` 与 `encoding_format: "float"`。维度可留空，此时不发送 `dimensions` 参数；指定时允许 1～4096，且服务必须支持该参数。查询时限允许 1000～60000 ms，相似度阈值须使用实际样本校准。
+
+默认 `off` 不调用向量服务。显式启用后，后台会把所有有效知识库中已发布、当前生效的文档片段发送到批准的接口，批量生成并保存向量。待复核版本不参与；旧数据自动补建，新资料最迟在下一轮扫描发现。更换地址、模型、维度或修订号会使用独立索引；同名模型更换权重时应增加 `REVISION`。
+
+查询采用带权限过滤的精确向量距离检索，再与关键词排名合并。索引尚未齐备时，有关键词结果会明确返回并展示降级提示；没有关键词结果则返回“索引更新中”，不会伪装成无资料。真实服务失败返回错误，不切换到伪造向量。当前适合本地试点；大规模数据需在测量后增加近似向量索引和独立任务调度。
+
+后台遇到临时错误会退避重试，连续失败三次后暂停；地址、权限、维度或结果格式等配置错误立即暂停，避免持续重复发送同一批文档。修正配置后重启应用恢复。
+
+## 检索质量评测
+
+在本目录运行 `npm run eval:retrieval`，默认使用 [28 条合成用例](eval/retrieval-cases.json)，在独立内存数据库中对比原关键词排名与新检索流程；不修改正在运行的知识库，也不调用外部模型。输出保存在仓库 `.artifacts/company-agent/retrieval-eval.json`。
+
+```powershell
+npm run eval:retrieval
+npm run eval:retrieval -- --dataset C:/private/retrieval-cases.json --output C:/private/retrieval-report.json
+```
+
+评测记录前五条结果的来源召回率、首个正确来源的排名，以及应该无结果的问题是否返回了资料。它衡量检索，不衡量生成答案的事实正确率。可按样例结构替换成真实问题及预期来源。
+
+填写向量配置后可加 `--hybrid` 对比语义检索；这个显式选项会把评测文档和问题发送到配置的向量服务。默认不因 `.env` 中已有真实模型配置就自动启用网络评测。
 
 ## PDF、Word 与扫描件
 
@@ -199,7 +237,7 @@ npm start
 - `DELETE /api/documents/:id`：具有维护权限时删除文档，立即停止查询和来源访问。
 - `GET /api/ingestion-jobs/:id`：鉴权后读取任务状态、已执行次数和失败原因。
 - `POST /api/ingestion-jobs/:id/retry`：具有维护权限时重试最新失败任务，请求 `{}`，返回 `202`。
-- `POST /api/search`：请求 `{ "query": "上线窗口", "knowledgeBaseIds": ["kb-engineering"], "limit": 5 }`，返回 `{ "query": "...", "method": "keyword", "hits": [...] }`。
+- `POST /api/search`：请求 `{ "query": "上线窗口", "knowledgeBaseIds": ["kb-engineering"], "limit": 5 }`，返回 `query`、`hits`、`method`（`keyword`／`hybrid`）、耗时、候选数量及可选 `note`。
 - `GET /api/document-chunks/:id`：再次鉴权后读取指定片段及其原文定位信息。
 - `POST /api/conversations`：请求 `{ "title": "发布流程", "knowledgeBaseIds": ["kb-engineering"] }`，创建当前员工的会话元数据。
 - `GET /api/conversations`：列出当前员工仍有权限访问的会话。
@@ -231,14 +269,14 @@ npm start
 在本目录运行指定测试：
 
 ```powershell
-node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env --test --test-concurrency=1 test/server.test.ts test/database.test.ts test/documents.test.ts test/documents-rich.test.ts test/document-parser.test.ts test/text-processing.test.ts test/chat.test.ts test/model.test.ts test/web.test.ts
+node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env --test --test-concurrency=1 test/server.test.ts test/database.test.ts test/documents.test.ts test/documents-rich.test.ts test/document-parser.test.ts test/text-processing.test.ts test/chat.test.ts test/model.test.ts test/web.test.ts test/embeddings.test.ts test/retrieval.test.ts
 ```
 
 测试使用本地 HTTP 服务、内存 PostgreSQL、独立的临时持久化目录、模拟模型及模拟 OpenAI 兼容接口，不需要外部模型 API、真实文档或 Docker。
 
 真实 PDF／Word／OCR 测试使用仓库内的合成文件，需安装下述解析环境，并设置 `KNOWLEDGE_PYTHON_PATH`。缺少解释器路径时会显式跳过这些测试。测试另外覆盖混合扫描页、旋转扫描页、Word 表格及内嵌图片、加密和损坏文件、页数限制、进程取消、复核权限、版本发布及 PDF 原件撤权。
 
-覆盖登录与权限、上传和索引、版本与任务恢复、问答来源隔离、无资料拒答、历史撤权及删除、旧版本上下文、SSE、忙碌与取消、超时及断线、引用校验、错误脱敏、兼容 API 请求格式，以及浏览器事件流的 UTF-8／CRLF 分片处理。
+覆盖登录与权限、上传和索引、版本与任务恢复、问答来源隔离、无资料拒答、历史撤权及删除、旧版本上下文、SSE、忙碌与取消、超时及断线、引用校验、错误脱敏、兼容 API 请求格式，以及 React 资源打包、静态文件白名单和浏览器事件流的 UTF-8／CRLF 分片处理。
 
 仓库根目录的 `npm run check` 检查格式、依赖和 TypeScript 类型；本目录的 `npm run typecheck` 还单独检查浏览器代码，`npm run lint` 检查本模块的后端、测试及网页脚本。
 
@@ -258,11 +296,17 @@ node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-
 - [answer-model.ts](src/answer-model.ts)：Pi Agent、模型适配和演示流。
 - [chat.ts](src/chat.ts)：检索、生成、并发、取消、权限复查和引用校验。
 - [chat-store.ts](src/chat-store.ts)：消息、来源关联和历史遮蔽。
-- [web.ts](src/web.ts)：固定静态资源入口及浏览器 TypeScript 类型去除。
+- [web.ts](src/web.ts)：React 启动时打包和固定静态资源入口。
 - [document-parser.ts](src/document-parser.ts)：Python 进程、时限、协议校验及带来源分块。
 - [parse_document.py](parser/parse_document.py)：PDF、DOCX、DOC 转换及本地 OCR。
 - [parsed-store.ts](src/parsed-store.ts)：候选版本与复核后的原子发布。
-- [document-viewer.ts](web/document-viewer.ts)：PDF.js 预览、页码高亮和逐块正文校对。
-- [网页入口](web/index.html)、[网页交互](web/app.ts)、[设计约定](DESIGN.md)。
+- [document-viewer.tsx](web/document-viewer.tsx)：React 原文弹窗、PDF.js 预览、页码高亮和逐块正文校对。
+- [retrieval.ts](src/retrieval.ts)、[search-query.ts](src/search-query.ts)、[search-ranking.ts](src/search-ranking.ts)：查询补全、候选排序、去重与排名融合。
+- [embeddings.ts](src/embeddings.ts)、[vector-index.ts](src/vector-index.ts)：兼容向量 API、后台索引和权限过滤。
+- [evaluate-retrieval.ts](src/evaluate-retrieval.ts)：独立检索评测入口。
+- [main.tsx](web/main.tsx)、[app.tsx](web/app.tsx)：React 挂载、登录状态和工作空间。
+- [use-chat.ts](web/use-chat.ts)、[chat-panel.tsx](web/chat-panel.tsx)、[messages.tsx](web/messages.tsx)：会话、流式回答、取消和来源引用。
+- [management.tsx](web/management.tsx)、[document-list.tsx](web/document-list.tsx)、[upload-form.tsx](web/upload-form.tsx)：文档处理状态、版本上传和用户组授权。
+- [网页入口](web/index.html)、[设计约定](DESIGN.md)。
 
-后续填写批准的真实模型配置，使用试点文档和问题集验证答案与引用质量，再接入向量检索、更多文档格式和正式部署设施。
+后续填写批准的真实模型配置，使用试点文档和问题集验证检索、答案与引用质量，再完善文档管理和正式部署设施。

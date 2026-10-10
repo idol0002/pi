@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
+import { vector } from "@electric-sql/pglite-pgvector";
 import { ChatStore } from "../src/chat-store.ts";
 import { migrate, openDatabase, seedDemo } from "../src/database.ts";
 import { DocumentService } from "../src/documents.ts";
@@ -94,7 +95,13 @@ it("persists data and never restores bootstrap permissions or passwords on resta
 			const migrations = await reopened.query<{ version: number }>(
 				"SELECT version FROM schema_migrations ORDER BY version",
 			);
-			assert.deepEqual(migrations.rows, [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+			assert.deepEqual(migrations.rows, [
+				{ version: 1 },
+				{ version: 2 },
+				{ version: 3 },
+				{ version: 4 },
+				{ version: 5 },
+			]);
 		} finally {
 			await reopened.close();
 		}
@@ -117,7 +124,7 @@ it("rejects a newer database schema and invalid bootstrap credentials", async ()
 });
 
 it("upgrades phase-one documents to versioned searchable sources without changing grants", async () => {
-	const database = new PGlite();
+	const database = new PGlite({ extensions: { vector } });
 	try {
 		await database.waitReady;
 		await database.exec(migrations[0].sql);

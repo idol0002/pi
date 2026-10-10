@@ -269,8 +269,8 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 			}
 			if (limit !== undefined && typeof limit !== "number")
 				throw new ApiError(400, "invalid_limit", "limit 必须是整数");
-			const hits = await documents.search(user.id, { query, knowledgeBaseIds: ids, limit });
-			sendJson(response, 200, { query, method: "keyword", hits });
+			const result = await chat.retrieval.search(user.id, { query, knowledgeBaseIds: ids, limit });
+			sendJson(response, 200, result);
 			return;
 		}
 		const knowledgePath = /^\/api\/knowledge-bases\/([^/]+)(?:\/(documents|grants|groups))?$/.exec(path);

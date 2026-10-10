@@ -188,4 +188,23 @@ export const migrations: readonly Migration[] = [
 			 WHEN status IN ('failed','cancelled') THEN 'failed' ELSE 'queued' END;
 		`,
 	},
+	{
+		version: 5,
+		sql: `
+			CREATE EXTENSION IF NOT EXISTS vector;
+			CREATE TABLE embedding_profiles (
+				id TEXT PRIMARY KEY,
+				dimensions INTEGER NOT NULL CHECK (dimensions BETWEEN 1 AND 4096),
+				created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+			);
+			CREATE TABLE chunk_embeddings (
+				chunk_id TEXT NOT NULL REFERENCES document_chunks(id) ON DELETE CASCADE,
+				profile_id TEXT NOT NULL REFERENCES embedding_profiles(id) ON DELETE CASCADE,
+				embedding vector NOT NULL,
+				PRIMARY KEY (chunk_id, profile_id)
+			);
+			CREATE INDEX chunk_embeddings_profile_idx ON chunk_embeddings(profile_id);
+			ALTER TABLE messages ADD COLUMN retrieval JSONB;
+		`,
+	},
 ];

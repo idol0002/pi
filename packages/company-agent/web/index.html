@@ -7,65 +7,10 @@
 	<title>知序 · 团队知识库</title>
 	<link rel="icon" href="data:,">
 	<link rel="stylesheet" href="/assets/styles.css">
-	<script type="module" src="/assets/app.ts"></script>
+	<script type="module" src="/assets/app.js"></script>
 </head>
 <body>
-	<div id="loading-view" class="loading-view" role="status">正在连接知识库…</div>
-	<main id="login-view" class="login-view" hidden>
-		<section class="login-story" aria-label="关于知序">
-			<div class="brand"><span class="brand-mark" aria-hidden="true">知</span><strong>知序</strong><span class="brand-caption">团队知识库</span></div>
-			<div class="login-intro"><p class="eyebrow">KNOWLEDGE, CONNECTED.</p><h1>把团队的知识，<br>变成有据可循的答案。</h1><p>从分散的文档到清晰的回答。<br>找到所需信息，也找到它的出处。</p><div class="story-note"><span class="note-index">01 /</span><div><strong>每个答案，都能回到原文</strong><p>在你的知识范围内检索，让经验更容易被找到。</p></div></div></div>
-			<p class="login-footnote">为团队协作而整理，为可靠回答而连接。</p>
-		</section>
-		<section class="login-form-panel">
-			<form id="login-form" class="login-form">
-				<p class="eyebrow">YOUR WORKSPACE</p><h2>登录知识空间</h2><p class="muted">使用你的团队账号，开始查找与提问。</p>
-				<label for="username">账号</label><input id="username" name="username" autocomplete="username" placeholder="请输入账号" maxlength="64" required>
-				<label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" maxlength="256" required>
-				<p id="login-error" class="form-error" role="alert" hidden></p><button id="login-submit" class="button primary" type="submit">登录并进入</button>
-				<p class="login-help">本地测试账号：alice（研发）、bob（财务）。<br>密码由本地配置提供。</p>
-			</form>
-		</section>
-	</main>
-	<div id="app-view" class="app-shell" hidden>
-		<aside class="sidebar" id="sidebar" aria-label="知识空间导航">
-			<a class="brand" href="/"><span class="brand-mark" aria-hidden="true">知</span><strong>知序</strong><span class="brand-caption">工作空间</span></a>
-			<button id="new-chat" class="button primary new-chat" type="button"><span aria-hidden="true">＋</span> 新建问答</button>
-			<nav class="nav-list" aria-label="主要功能"><button id="nav-chat" class="nav-item active" type="button" aria-current="page"><span class="nav-symbol" aria-hidden="true">↗</span>知识问答</button><button id="nav-manage" class="nav-item" type="button"><span class="nav-symbol" aria-hidden="true">▤</span>知识管理</button></nav>
-			<div class="sidebar-section scope-section"><p class="section-label">问答知识范围</p><div id="scope-list" class="scope-list"></div><p id="scope-hint" class="sidebar-hint">选择本次问答使用的知识库</p></div>
-			<div class="sidebar-section history-section"><p class="section-label">最近问答</p><div id="conversation-list" class="conversation-list"></div></div>
-			<div class="sidebar-user"><span id="user-avatar" class="user-avatar" aria-hidden="true"></span><div><strong id="user-name"></strong><span id="user-account" class="muted"></span></div><button id="logout" class="text-button" type="button">退出</button></div>
-		</aside>
-		<main class="workspace">
-			<header class="workspace-header"><div class="header-heading"><button id="menu-toggle" class="button compact menu-toggle" type="button" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar">菜单</button><div><p class="breadcrumb">工作空间 <span aria-hidden="true">/</span> <span id="page-section">知识问答</span></p><h1 id="page-title">新的问答</h1></div></div><span id="model-badge" class="badge"></span></header>
-			<div id="notice" class="notice" role="status" hidden></div>
-			<section id="chat-panel" class="chat-panel" aria-label="知识问答">
-				<div id="chat-scroll" class="chat-scroll">
-					<section id="welcome" class="welcome"><div class="welcome-mark" aria-hidden="true">知</div><p class="eyebrow">YOUR TEAM’S KNOWLEDGE, ONE QUESTION AWAY</p><h2>想了解些什么？</h2><p class="welcome-description">从团队文档中寻找答案，<br class="mobile-only">让每一次提问都有依据。</p><div id="suggestions" class="suggestions"></div><div class="welcome-footer"><span class="small-dot" aria-hidden="true"></span>只检索你有权访问的知识 · 引用可追溯</div></section>
-					<div id="messages" class="messages" role="log" aria-label="问答记录" aria-live="off"></div>
-				</div>
-				<div class="composer-area"><p id="generation-status" class="generation-status" role="status"></p><form id="question-form" class="composer"><label class="sr-only" for="question">你的问题</label><textarea id="question" name="question" rows="2" maxlength="2000" placeholder="向知识库提问，例如：发布前需要做哪些准备？" required></textarea><div class="composer-toolbar"><span id="composer-scope" class="muted">请选择知识范围</span><div class="composer-actions"><span id="question-count" class="character-count">0 / 2000</span><button id="stop-answer" class="button" type="button" hidden>停止生成</button><button id="send-question" class="button primary" type="submit">发送 <span aria-hidden="true">↑</span></button></div></div></form><p id="answer-note" class="answer-note">回答基于知识库资料，请结合引用原文核对。</p></div>
-			</section>
-			<section id="manage-panel" class="manage-panel" aria-label="知识管理" hidden>
-				<div class="management-heading"><div><h2>让知识保持更新</h2><p class="muted">上传团队资料，管理访问范围。</p></div><div class="management-controls"><label class="sr-only" for="manage-base">管理知识库</label><select id="manage-base"></select><button id="refresh-documents" class="button" type="button">刷新</button></div></div>
-				<div id="manage-empty" class="empty-panel" hidden>你暂时没有可访问的知识库。</div>
-				<div id="management-content">
-					<form id="upload-form" class="upload-card"><div><h3 id="upload-heading">添加知识文档</h3><p class="muted">支持 PDF、Word、Markdown、TXT。PDF / Word 最大 20 MiB，文本最大 1 MiB。扫描件会在后台识别，存在识别问题时需复核后入库。</p></div><div class="upload-fields"><label class="file-picker" for="upload-file"><span aria-hidden="true">＋</span><span id="file-label">选择一份文档</span><input id="upload-file" name="file" type="file" accept=".md,.markdown,.txt,.pdf,.docx,.doc" required></label><div class="upload-title"><label class="sr-only" for="upload-title">文档标题（可选）</label><input id="upload-title" name="title" placeholder="文档标题（可选）" maxlength="200"></div><button id="cancel-update" class="button" type="button" hidden>取消更新</button><button id="upload-submit" class="button primary" type="submit">上传并入库</button></div><p id="upload-status" class="form-hint" role="status"></p></form>
-					<section class="documents-card"><div class="card-heading"><h3>文档列表 <span id="document-count" class="count-badge">0</span></h3><p id="document-summary" class="muted"></p></div><div class="table-scroll"><table><thead><tr><th scope="col">文档名称</th><th scope="col">当前版本</th><th scope="col">处理状态</th><th scope="col">操作</th></tr></thead><tbody id="document-list"></tbody></table></div><p id="documents-empty" class="empty-text" hidden>这里还没有文档。上传第一份资料后，就可以开始提问。</p></section>
-					<form id="grants-form" class="grants-card" hidden><div class="card-heading"><div><h3>访问权限</h3><p class="muted">按用户组设置访问范围，至少保留一个管理组。</p></div><button id="save-grants" class="button" type="submit">保存权限</button></div><div id="grant-list" class="grant-list"></div><p id="grants-status" class="form-hint" role="status"></p></form>
-				</div>
-			</section>
-		</main>
-	</div>
-	<dialog id="source-dialog" class="source-dialog" aria-labelledby="source-title">
-		<div class="dialog-heading"><div><p class="eyebrow">SOURCE DOCUMENT</p><h2 id="source-title">引用原文</h2><p id="source-meta" class="muted"></p></div><button id="close-source" class="button compact" type="button" aria-label="关闭原文">关闭</button></div>
-		<div id="source-toolbar" class="source-toolbar" hidden><button id="source-previous" class="button compact" type="button">上一页</button><span id="source-page-status" role="status"></span><button id="source-next" class="button compact" type="button">下一页</button></div>
-		<div id="source-warnings" class="source-warnings" role="status" hidden></div>
-		<div class="source-layout"><div id="source-pdf-stage" class="source-pdf-stage" hidden><canvas id="source-pdf" role="img" aria-label="PDF 原文"></canvas></div><pre id="source-content" class="source-content"></pre></div>
-		<section id="source-review" class="source-review" hidden><h3>核对识别正文</h3><p class="muted">请对照原件逐页核对，尤其是数字、名称和表格。可修正当前页的文字；翻页会保留修改。</p><div id="source-review-blocks" class="source-review-blocks"></div><label class="review-confirm"><input id="source-confirm" type="checkbox">我已核对全部原件与正文，确认可以用于问答</label><button id="source-publish" class="button primary" type="button" disabled>确认并入库</button></section>
-		<p id="source-review-status" class="form-error" role="status"></p>
-		<div class="dialog-footer"><p class="muted">原文读取时再次检查当前权限</p><a id="source-link" class="button" target="_blank" rel="noopener noreferrer">打开原文</a></div>
-	</dialog>
+	<div id="root"><output class="loading-view">正在连接知识库…</output></div>
 	<noscript>请启用 JavaScript 后使用知识库网页。</noscript>
 </body>
 </html>

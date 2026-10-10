@@ -5,6 +5,8 @@ import { documentFormat, validateDocument } from "./document-format.ts";
 import { composeParsedDocument } from "./document-parser.ts";
 import { ApiError, notFound } from "./errors.ts";
 import { publishParsedDocument } from "./parsed-store.ts";
+import { planSearch, type SearchPlan } from "./search-query.ts";
+import { rankKeywordHits } from "./search-ranking.ts";
 import { accessibleKnowledgeBases, documentAccess } from "./store.ts";
 import { searchTerms } from "./text-processing.ts";
 import type {
@@ -21,16 +23,18 @@ import type {
 export const MAX_PENDING_JOBS = 100;
 export const MAX_INGESTION_ATTEMPTS = 3;
 
+type PreviewVersion = Pick<DocumentPreview, "versionId" | "filename" | "mediaType" | "status"> & { hasPdf: boolean };
+
 const versionColumns = `v.id, v.document_id AS "documentId", v.version, v.title, v.filename,
 	v.media_type AS "mediaType", v.size_bytes AS "sizeBytes", v.sha256, v.status,
 	v.chunk_count AS "chunkCount", v.error, v.created_by AS "createdBy", v.created_at AS "createdAt"`;
 const jobColumns = `j.id, j.document_id AS "documentId", j.version_id AS "versionId", j.status, j.attempts, j.error,
 	j.created_at AS "createdAt", j.updated_at AS "updatedAt", j.stage, j.processed_pages AS "processedPages", j.total_pages AS "totalPages", j.warnings`;
-const chunkColumns = `c.id, d.id AS "documentId", d.knowledge_base_id AS "knowledgeBaseId",
+export const chunkColumns = `c.id, d.id AS "documentId", d.knowledge_base_id AS "knowledgeBaseId",
 	v.id AS "versionId", v.version, v.title, v.filename, c.position, c.text, c.heading,
 	c.start_line AS "startLine", c.end_line AS "endLine", c.start_offset AS "startOffset", c.end_offset AS "endOffset", c.locations`;
 
-function withSourceUrl<T extends Omit<DocumentChunk, "sourceUrl">>(chunk: T): T & { sourceUrl: string } {
+export function withSourceUrl<T extends Omit<DocumentChunk, "sourceUrl">>(chunk: T): T & { sourceUrl: string } {
 	const query = new URLSearchParams({
 		versionId: chunk.versionId,
 		startLine: String(chunk.startLine),
@@ -250,22 +254,30 @@ export class DocumentService {
 		content: Uint8Array;
 		filename: string;
 	}> {
-		const version = await this.previewVersion(userId, documentId, versionId);
-		return { content: version.sourceBytes, filename: version.filename };
+		return this.previewVersion(userId, documentId, versionId, async (transaction, version) => {
+			const { rows } = await transaction.query<{ content: Uint8Array }>(
+				"SELECT source_bytes AS content FROM document_versions WHERE id = $1",
+				[version.versionId],
+			);
+			return { content: rows[0].content, filename: version.filename };
+		});
 	}
 
-	private async previewVersion(userId: string, documentId: string, versionId: string | null) {
+	private async previewVersion<T>(
+		userId: string,
+		documentId: string,
+		versionId: string | null,
+		read: (transaction: SqlClient, version: PreviewVersion) => Promise<T>,
+	): Promise<T> {
 		return this.database.transaction(async (transaction) => {
 			const { rows } = await transaction.query<
-				Omit<DocumentPreview, "pdfUrl"> & {
-					sourceBytes: Uint8Array;
-					previewPdf: Uint8Array | null;
+				PreviewVersion & {
 					knowledgeBaseId: string;
 					latest: boolean;
 				}
 			>(
-				`SELECT v.id AS "versionId", v.filename, v.media_type AS "mediaType", COALESCE(v.text, '') AS text,
-				 v.pages, v.blocks, v.warnings, v.status, v.source_bytes AS "sourceBytes", v.preview_pdf AS "previewPdf",
+				`SELECT v.id AS "versionId", v.filename, v.media_type AS "mediaType", v.status,
+				 (v.media_type = 'application/pdf' OR v.preview_pdf IS NOT NULL) AS "hasPdf",
 				 d.knowledge_base_id AS "knowledgeBaseId", d.latest_version_id = v.id AS latest
 				 FROM document_versions v JOIN documents d ON d.id = v.document_id
 				 WHERE d.id = $2 AND v.id = COALESCE($3::text, d.current_version_id)
@@ -278,32 +290,36 @@ export class DocumentService {
 				if (version.status !== "needs_review" || !version.latest) throw notFound();
 				await requireEditor(transaction, userId, version.knowledgeBaseId);
 			}
-			return version;
+			const { knowledgeBaseId: _base, latest: _latest, ...metadata } = version;
+			return read(transaction, metadata);
 		});
 	}
 
 	async preview(userId: string, documentId: string, versionId: string | null): Promise<DocumentPreview> {
-		const {
-			sourceBytes: _sourceBytes,
-			previewPdf,
-			knowledgeBaseId: _knowledgeBaseId,
-			latest: _latest,
-			...version
-		} = await this.previewVersion(userId, documentId, versionId);
-		return {
-			...version,
-			pdfUrl:
-				version.mediaType === "application/pdf" || previewPdf
+		return this.previewVersion(userId, documentId, versionId, async (transaction, { hasPdf, ...version }) => {
+			const { rows } = await transaction.query<Pick<DocumentPreview, "text" | "pages" | "blocks" | "warnings">>(
+				"SELECT COALESCE(text, '') AS text, pages, blocks, warnings FROM document_versions WHERE id = $1",
+				[version.versionId],
+			);
+			return {
+				...version,
+				...rows[0],
+				pdfUrl: hasPdf
 					? `/api/documents/${encodeURIComponent(documentId)}/pdf?versionId=${encodeURIComponent(version.versionId)}`
 					: null,
-		};
+			};
+		});
 	}
 
 	async readPdf(userId: string, documentId: string, versionId: string | null): Promise<Uint8Array> {
-		const version = await this.previewVersion(userId, documentId, versionId);
-		if (version.previewPdf) return version.previewPdf;
-		if (version.mediaType !== "application/pdf") throw notFound();
-		return version.sourceBytes;
+		return this.previewVersion(userId, documentId, versionId, async (transaction, version) => {
+			if (!version.hasPdf) throw notFound();
+			const { rows } = await transaction.query<{ content: Uint8Array }>(
+				"SELECT COALESCE(preview_pdf, source_bytes) AS content FROM document_versions WHERE id = $1",
+				[version.versionId],
+			);
+			return rows[0].content;
+		});
 	}
 
 	async approveReview(
@@ -354,12 +370,18 @@ export class DocumentService {
 		return withSourceUrl(rows[0]);
 	}
 
-	async search(userId: string, input: SearchRequest): Promise<SearchHit[]> {
+	async search(
+		userId: string,
+		input: SearchRequest,
+		options: { plan?: SearchPlan; baseline?: boolean; candidates?: boolean } = {},
+	): Promise<SearchHit[]> {
 		if (typeof input.query !== "string" || !input.query.trim() || input.query.length > 300) {
 			throw new ApiError(400, "invalid_query", "query 必须是 1 到 300 个字符的文本");
 		}
-		const terms = searchTerms(input.query);
-		if (terms.length === 0 || terms.length > 64)
+		const rawTerms = searchTerms(input.query);
+		const plan = options.plan ?? planSearch(input.query);
+		const terms = options.baseline ? rawTerms : [...new Set([...plan.terms, ...plan.expandedTerms])];
+		if (rawTerms.length === 0 || rawTerms.length > 64)
 			throw new ApiError(400, "invalid_query", "请提供 1 到 64 个可检索的关键词");
 		const limit = input.limit ?? 5;
 		if (!Number.isInteger(limit) || limit < 1 || limit > 20)
@@ -377,6 +399,7 @@ export class DocumentService {
 			}
 			if ((await accessibleKnowledgeBases(this.database, userId, ids)).length !== ids.length) throw notFound();
 		}
+		if (terms.length === 0) return [];
 		// Every term contains letters/numbers only; user text never becomes SQL or raw tsquery syntax.
 		const query = terms.map((term) => `'${term}'`).join(" | ");
 		const { rows } = await this.database.query<Omit<SearchHit, "sourceUrl">>(
@@ -387,9 +410,12 @@ export class DocumentService {
 			 SELECT ${chunkColumns}, ts_rank_cd(c.search_vector, query, 32)::double precision AS score
 			 FROM allowed_documents d JOIN document_versions v ON v.id = d.current_version_id AND v.status = 'ready'
 			 JOIN document_chunks c ON c.version_id = v.id, to_tsquery('simple', $3) query
-			 WHERE c.search_vector @@ query ORDER BY score DESC, d.id, c.position LIMIT $4`,
-			[userId, ids, query, limit],
+			 WHERE (c.search_vector @@ query OR d.id = ANY($5::text[])) ORDER BY score DESC, d.id, c.position LIMIT $4`,
+			[userId, ids, query, options.baseline ? limit : 80, options.baseline ? [] : plan.contextDocumentIds],
 		);
-		return rows.map(withSourceUrl);
+		const hits = rows.map(withSourceUrl);
+		if (options.baseline) return hits;
+		const ranked = rankKeywordHits(hits, plan);
+		return options.candidates ? ranked : ranked.slice(0, limit);
 	}
 }

@@ -4,8 +4,9 @@
 		"noEmit": true,
 		"lib": ["ES2024", "DOM", "DOM.Iterable"],
 		"types": [],
+		"jsx": "react-jsx",
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext"
 	},
-	"include": ["web/**/*.ts", "src/types.ts"]
+	"include": ["web/**/*.ts", "web/**/*.tsx", "src/types.ts"]
 }

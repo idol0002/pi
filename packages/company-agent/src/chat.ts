@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
 import type { AnswerEvidence, AnswerInput, AnswerModel } from "./answer-model.ts";
 import { ChatStore, publicMessage, type StoredMessage } from "./chat-store.ts";
-import { DocumentService } from "./documents.ts";
 import { ApiError, notFound } from "./errors.ts";
-import { searchTerms } from "./text-processing.ts";
-import type { ChatEvent, ModelInfo } from "./types.ts";
+import { RetrievalService } from "./retrieval.ts";
+import { planSearch } from "./search-query.ts";
+import type { ChatEvent, ModelInfo, SearchResult } from "./types.ts";
 
 const MAX_ANSWER_LENGTH = 24_000;
 const MAX_EVIDENCE_LENGTH = 12_000;
@@ -32,14 +32,14 @@ export interface ChatRun {
 export class ChatService {
 	readonly store: ChatStore;
 	readonly info: ModelInfo;
-	private readonly documents: DocumentService;
+	readonly retrieval: RetrievalService;
 	private readonly model: AnswerModel;
 	private readonly runs = new Map<string, ActiveRun>();
 	private stopping = false;
 
-	constructor(database: PGlite, model: AnswerModel) {
+	constructor(database: PGlite, model: AnswerModel, retrieval = new RetrievalService(database)) {
 		this.store = new ChatStore(database);
-		this.documents = new DocumentService(database);
+		this.retrieval = retrieval;
 		this.model = model;
 		this.info = model.info;
 	}
@@ -105,23 +105,42 @@ export class ChatService {
 					const previous = (await this.store.history(userId, conversationId)).filter(
 						(message) => message.runId !== active.id,
 					);
-					let query = "";
-					for (const term of searchTerms(question)) {
-						const candidate = query ? `${query} ${term}` : term;
-						if (candidate.length <= 300 && searchTerms(candidate).length <= 64) query = candidate;
-						if (query.length >= 280) break;
-					}
-					const hits = query
-						? await this.documents.search(userId, {
-								query,
-								knowledgeBaseIds: conversation.knowledgeBaseIds,
-								limit: 6,
-							})
-						: [];
+					const previousAnswer = previous.findLast(
+						(message) =>
+							message.role === "assistant" &&
+							message.status === "complete" &&
+							!message.redacted &&
+							message.evidence.length > 0 &&
+							message.evidence.every((source) => source.current),
+					);
+					const previousQuestion = previous.find(
+						(message) => message.role === "user" && message.runId === previousAnswer?.runId,
+					)?.content;
+					const plan = planSearch(
+						question,
+						previousQuestion,
+						previousAnswer?.evidence.map((source) => source.documentId),
+					);
+					const retrieval: SearchResult = plan.keywordQuery
+						? await this.retrieval.search(
+								userId,
+								{ query: plan.keywordQuery, knowledgeBaseIds: conversation.knowledgeBaseIds, limit: 6 },
+								{ signal, plan },
+							)
+						: {
+								query: "",
+								hits: [],
+								method: "keyword",
+								contextual: false,
+								durationMs: 0,
+								keywordCandidates: 0,
+								semanticCandidates: 0,
+							};
+					const hits = retrieval.hits;
 					evidence = hits.map((source, index) => ({ ...source, number: index + 1, current: true }));
-					const history = addHistory(previous, evidence);
+					const history = hits.length > 0 || plan.contextual ? addHistory(previous, evidence) : [];
 					await checkAccess();
-					await emit({ type: "status", stage: "answering", sourceCount: evidence.length });
+					await emit({ type: "status", stage: "answering", sourceCount: evidence.length, note: retrieval.note });
 					let result: Awaited<ReturnType<AnswerModel["generate"]>>;
 					if (evidence.length === 0) {
 						result = { content: NO_EVIDENCE, usage: null };
@@ -158,6 +177,14 @@ export class ChatService {
 						result.usage,
 						evidence,
 						cited,
+						{
+							method: retrieval.method,
+							contextual: retrieval.contextual,
+							durationMs: retrieval.durationMs,
+							keywordCandidates: retrieval.keywordCandidates,
+							semanticCandidates: retrieval.semanticCandidates,
+							note: retrieval.note,
+						},
 					);
 					await checkAccess();
 					const message = (await this.store.history(userId, conversationId)).find((item) => item.id === messageId);

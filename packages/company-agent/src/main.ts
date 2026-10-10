@@ -4,9 +4,12 @@ import { fileURLToPath } from "node:url";
 import { createAnswerModel } from "./answer-model.ts";
 import { ChatService } from "./chat.ts";
 import { openDatabase, seedDemo } from "./database.ts";
+import { createEmbeddingModel } from "./embeddings.ts";
 import { IngestionWorker } from "./ingestion.ts";
 import { readModelConfig } from "./model-config.ts";
+import { RetrievalService } from "./retrieval.ts";
 import { createKnowledgeServer } from "./server.ts";
+import { VectorIndex } from "./vector-index.ts";
 
 const password = process.env.KNOWLEDGE_DEMO_PASSWORD;
 if (!password || password.length < 12 || password.length > 256) {
@@ -21,14 +24,17 @@ const dataDirectory = process.env.KNOWLEDGE_DATA_DIR
 	? resolve(process.env.KNOWLEDGE_DATA_DIR)
 	: fileURLToPath(new URL("../../../.artifacts/company-agent/pgdata", import.meta.url));
 const model = createAnswerModel(readModelConfig());
+const embedding = createEmbeddingModel();
 await mkdir(dirname(dataDirectory), { recursive: true });
 
 const database = await openDatabase(dataDirectory);
 const ingestion = new IngestionWorker(database, { onError: (error) => console.error(error) });
-const chat = new ChatService(database, model);
+const vectors = embedding ? new VectorIndex(database, embedding) : undefined;
+const chat = new ChatService(database, model, new RetrievalService(database, vectors));
 try {
 	const seeded = await seedDemo(database, password);
 	await ingestion.start();
+	vectors?.start();
 	const server = await createKnowledgeServer(database, { ingestion, chat, onError: (error) => console.error(error) });
 	await new Promise<void>((ready, reject) => {
 		server.once("error", reject);
@@ -39,6 +45,7 @@ try {
 	});
 	console.log(`Knowledge Web: http://127.0.0.1:${port}`);
 	console.log(`Model: ${model.info.name} (${model.info.mode})`);
+	console.log(`Retrieval: ${vectors ? "keyword + vector" : "keyword"}`);
 	console.log(`Database: ${dataDirectory}`);
 	if (seeded) console.log("已初始化测试账号 alice、bob，密码来自 KNOWLEDGE_DEMO_PASSWORD。");
 	let stopping = false;
@@ -47,8 +54,7 @@ try {
 		stopping = true;
 		void chat.stop().catch((error: unknown) => console.error(error));
 		server.close(() => {
-			void ingestion
-				.stop()
+			void Promise.all([ingestion.stop(), vectors?.stop()])
 				.then(() => database.close())
 				.catch((error: unknown) => {
 					console.error(error);
@@ -61,6 +67,7 @@ try {
 } catch (error) {
 	await chat.stop();
 	await ingestion.stop();
+	await vectors?.stop();
 	await database.close();
 	throw error;
 }

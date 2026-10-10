@@ -25,11 +25,12 @@ export async function checkedFetch(path: string, init: RequestInit = {}): Promis
 	return response;
 }
 
-export async function api<T>(path: string, method = "GET", body?: unknown): Promise<T> {
+export async function api<T>(path: string, method = "GET", body?: unknown, signal?: AbortSignal): Promise<T> {
 	const response = await checkedFetch(path, {
 		method,
 		headers: body === undefined ? undefined : { "Content-Type": "application/json" },
 		body: body === undefined ? undefined : JSON.stringify(body),
+		signal,
 	});
 	return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
 }

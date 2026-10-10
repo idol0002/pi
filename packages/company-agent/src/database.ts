@@ -1,4 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
+import { vector } from "@electric-sql/pglite-pgvector";
 import { initializeDocumentVersions } from "./document-index.ts";
 import { migrations } from "./migrations.ts";
 import { hashPassword } from "./password.ts";
@@ -28,7 +29,7 @@ export async function migrate(database: PGlite): Promise<void> {
 }
 
 export async function openDatabase(dataDirectory?: string): Promise<PGlite> {
-	const database = new PGlite(dataDirectory);
+	const database = new PGlite({ dataDir: dataDirectory, extensions: { vector } });
 	try {
 		await database.waitReady;
 		await migrate(database);

@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
-import { stripTypeScriptTypes } from "node:module";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
 export interface WebAsset {
 	content: string | Uint8Array;
@@ -12,23 +13,34 @@ export async function loadWebAssets(): Promise<Map<string, WebAsset>> {
 	const files = [
 		["/", "index.html", "text/html; charset=utf-8"],
 		["/assets/styles.css", "styles.css", "text/css; charset=utf-8"],
-		...["app", "client", "stream", "document-viewer"].map((name) => [
-			`/assets/${name}.ts`,
-			`${name}.ts`,
-			"text/javascript; charset=utf-8",
-		]),
 	];
 	await Promise.all(
 		files.map(async ([path, filename, contentType]) => {
 			const source = await readFile(new URL(`../web/${filename}`, import.meta.url), "utf8");
 			assets.set(path, {
-				content: filename.endsWith(".ts")
-					? stripTypeScriptTypes(source).replace('from "pdfjs-dist"', 'from "/assets/pdf.mjs"')
-					: source,
+				content: source,
 				contentType,
 			});
 		}),
 	);
+	const bundle = await build({
+		entryPoints: [fileURLToPath(new URL("../web/main.tsx", import.meta.url))],
+		tsconfig: fileURLToPath(new URL("../tsconfig.web.json", import.meta.url)),
+		bundle: true,
+		write: false,
+		platform: "browser",
+		format: "esm",
+		jsx: "automatic",
+		target: "es2022",
+		minify: true,
+		define: { "process.env.NODE_ENV": '"production"' },
+		alias: { "pdfjs-dist": "/assets/pdf.mjs" },
+		external: ["/assets/pdf.mjs"],
+		logLevel: "silent",
+	});
+	const script = bundle.outputFiles[0];
+	if (!script || bundle.warnings.length > 0) throw new Error("React 网页编译失败或产生警告，请检查前端代码");
+	assets.set("/assets/app.js", { content: script.text, contentType: "text/javascript; charset=utf-8" });
 	const pdfRoot = new URL("../", import.meta.resolve("pdfjs-dist"));
 	for (const name of ["pdf.mjs", "pdf.worker.mjs"]) {
 		assets.set(`/assets/${name}`, {
