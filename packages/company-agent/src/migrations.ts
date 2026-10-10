@@ -1,3 +1,7 @@
+/**
+ * 数据模型演进目录。database.migrate 在事务中按 version 执行尚未应用的迁移。
+ * 先读各版本的中文说明，再沿外键理解“知识库 → 文档 → 版本 → 片段”和“会话 → 消息 → 来源”。
+ */
 import type { Transaction } from "@electric-sql/pglite";
 import { initializeDocumentVersions } from "./document-index.ts";
 
@@ -8,6 +12,7 @@ interface Migration {
 }
 
 export const migrations: readonly Migration[] = [
+	// v1：账号、用户组、授权、文档和会话。会话固定到创建者及所选择的知识库。
 	{
 		version: 1,
 		sql: `
@@ -75,6 +80,8 @@ export const migrations: readonly Migration[] = [
 			);
 		`,
 	},
+	// v2：原件与正文进入独立版本；current 指向生效版本，latest 指向最新上传版本。
+	// 分块表保存检索索引与原文位置，任务表保存后台处理状态，不依赖进程内存记住进度。
 	{
 		version: 2,
 		sql: `
@@ -129,6 +136,8 @@ export const migrations: readonly Migration[] = [
 		`,
 		after: initializeDocumentVersions,
 	},
+	// v3：一轮问答用 run_id 关联用户消息和助手消息；唯一索引约束每个会话的 running 消息。
+	// 来源关联保留版本/片段 ID，正文被清理后仍能判断历史回答是否依赖已失效资料。
 	{
 		version: 3,
 		sql: `
@@ -162,6 +171,7 @@ export const migrations: readonly Migration[] = [
 			CREATE INDEX message_sources_document_idx ON message_sources(document_id);
 		`,
 	},
+	// v4：扩展 PDF/Word、页码、正文块、OCR 警告及人工复核信息。
 	{
 		version: 4,
 		sql: `
@@ -188,6 +198,7 @@ export const migrations: readonly Migration[] = [
 			 WHEN status IN ('failed','cancelled') THEN 'failed' ELSE 'queued' END;
 		`,
 	},
+	// v5：向量按模型配置 profile 隔离；这里只建普通索引，查询使用精确距离排序。
 	{
 		version: 5,
 		sql: `

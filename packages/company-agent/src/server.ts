@@ -1,3 +1,7 @@
+/**
+ * HTTP 边界：校验请求 → 认证用户 → 选择路由 → 调用业务服务 → 返回 JSON/文件/SSE。
+ * 初学时先读 handle 的路由，再按调用进入 store/documents/chat；这里不直接组织模型提示词。
+ */
 import { File } from "node:buffer";
 import { once } from "node:events";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -25,6 +29,7 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
 }
 
 function objectBody(value: unknown, allowedFields: string[]): Record<string, unknown> {
+	// TypeScript 不能验证运行时 JSON；先限制对象和字段，字段类型/长度再分别检查。
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new ApiError(400, "invalid_body", "请求内容必须是 JSON 对象");
 	}
@@ -43,6 +48,7 @@ function textField(body: Record<string, unknown>, field: string, maxLength: numb
 }
 
 async function readBytes(request: IncomingMessage, maxBytes: number): Promise<Buffer> {
+	// 同时检查声明长度和实际收到的字节数，客户端省略或伪造 Content-Length 也不能绕过上限。
 	if (request.headers["content-encoding"] && request.headers["content-encoding"] !== "identity") {
 		throw new ApiError(415, "unsupported_encoding", "不支持压缩的请求内容");
 	}
@@ -77,6 +83,7 @@ async function readJson(
 }
 
 async function readUpload(request: IncomingMessage): Promise<DocumentUpload> {
+	// 当前是大小受限的完整表单上传：缓冲后解析 file/title，不提供分片或断点续传。
 	const contentType = request.headers["content-type"] ?? "";
 	if (contentType.split(";")[0].trim().toLowerCase() !== "multipart/form-data") {
 		throw new ApiError(415, "unsupported_media_type", "请使用 multipart/form-data 上传 file 字段");
@@ -153,11 +160,13 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 	const store = new KnowledgeStore(database);
 	const documents = new DocumentService(database);
 	const chat = options.chat ?? new ChatService(database, createAnswerModel(readModelConfig({})));
+	// 重启只修正中断消息状态，不重新执行可能产生费用的模型请求。
 	await chat.store.recoverInterrupted();
 	const assets = await loadWebAssets();
 	const server = createServer(
 		{ maxHeaderSize: 8192, requestTimeout: 120_000, headersTimeout: 10_000 },
 		(request, response) => {
+			// 页面与 API 同源；敏感响应不缓存，资源加载和嵌入行为由这些响应头进一步约束。
 			response.setHeader("Cache-Control", "no-store");
 			response.setHeader("X-Content-Type-Options", "nosniff");
 			response.setHeader("Referrer-Policy", "no-referrer");
@@ -185,6 +194,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 	);
 
 	async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+		// 本地入口只接受自身 Host 和同源请求；这些约束与 main.ts 的监听方式配套。
 		const address = server.address() as AddressInfo;
 		const host = request.headers.host;
 		if (host !== `127.0.0.1:${address.port}` && host !== `localhost:${address.port}`) {
@@ -207,6 +217,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 			throw new ApiError(400, "invalid_url", "请求地址编码无效");
 		}
 		const method = request.method;
+		// 静态页与登录前资源只从固定 Map 读取；不存在把任意 URL 变成磁盘路径的分支。
 		const asset = method === "GET" ? assets.get(path) : undefined;
 		if (asset) {
 			response.writeHead(200, { "Content-Type": asset.contentType });
@@ -217,6 +228,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 			sendJson(response, 200, { status: "ok", mode: "local-development" });
 			return;
 		}
+		// 重复同名 Cookie 不任选其一，避免浏览器和服务端对身份产生不同解释。
 		const cookies = (request.headers.cookie ?? "")
 			.split(";")
 			.map((cookie) => cookie.trim())
@@ -243,6 +255,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 			return;
 		}
 
+		// 从这里开始的业务接口都需要登录。后续服务只接收验证所得的 user.id。
 		const user = await auth.authenticate(token);
 		if (method === "GET" && path === "/api/model") {
 			sendJson(response, 200, { model: chat.info });
@@ -287,6 +300,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 			}
 			if (method === "POST" && resource === "documents") {
 				const target = { knowledgeBaseId: id };
+				// 先验证权限再读取较大的文件；upload 的事务内还会再次验证，覆盖上传期间的撤权。
 				await documents.requireUploadAccess(user.id, target);
 				const receipt = await documents.upload(user.id, target, await readUpload(request));
 				options.ingestion.wake();
@@ -322,6 +336,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 				return;
 			}
 			if (method === "POST" && resource === "review") {
+				// 前端提交的是正文块修正；是否仍为最新待复核版本由 DocumentService 在事务中确认。
 				const body = await readJson(request, ["versionId", "changes", "confirmed"], 2 * 1024 * 1024);
 				if (body.confirmed !== true || !Array.isArray(body.changes) || body.changes.length > 12000) {
 					throw new ApiError(400, "invalid_review", "请核对原件与识别正文，并确认复核结果");
@@ -339,6 +354,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 				return;
 			}
 			if (method === "GET" && resource === "source") {
+				// 固定版本和行号属于来源定位；即使地址来自旧回答，也重新检查当前访问权限。
 				const source = await store.readDocument(user.id, id, sourceVersion(url));
 				let text = source.text;
 				if (url.searchParams.has("startLine") || url.searchParams.has("endLine")) {
@@ -364,6 +380,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 				return;
 			}
 			if (method === "GET" && resource === "download") {
+				// 原件以附件返回；预览走受控的 preview/pdf 接口。
 				const source = await documents.readOriginal(user.id, id, sourceVersion(url));
 				const filename = encodeURIComponent(source.filename).replace(
 					/['()*]/g,
@@ -419,6 +436,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 			return;
 		}
 		if (method === "POST" && path === "/api/conversations") {
+			// 选中的知识库只能收窄用户已有的权限；真正的范围检查在 createConversation 中。
 			const body = await readJson(request, ["title", "knowledgeBaseIds"]);
 			const title = textField(body, "title", 200).trim();
 			const ids = body.knowledgeBaseIds;
@@ -441,6 +459,7 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 		}
 		const cancelPath = /^\/api\/conversations\/([^/]+)\/runs\/([^/]+)\/cancel$/.exec(path);
 		if (method === "POST" && cancelPath) {
+			// 必须匹配会话和具体 run，避免一个较晚到达的取消请求误停下一轮生成。
 			await readJson(request, []);
 			await chat.cancel(user.id, cancelPath[1], cancelPath[2]);
 			response.writeHead(204);
@@ -455,10 +474,12 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 			return;
 		}
 		if (method === "POST" && conversationPath?.[2] === "messages") {
+			// prepare 发生在 SSE 响应头之前：参数/权限/并发错误仍可返回普通 JSON HTTP 错误。
 			const body = await readJson(request, ["content"]);
 			const run = await chat.prepare(user.id, conversationPath[1], textField(body, "content", 2000), () =>
 				auth.authenticate(token),
 			);
+			// 浏览器取消读取或连接断开，也需要取消后端运行，而不只是停止页面显示。
 			response.once("close", run.abort);
 			if (response.destroyed) run.abort();
 			else {
@@ -469,12 +490,14 @@ export async function createKnowledgeServer(database: PGlite, options: ServerOpt
 				});
 				response.flushHeaders();
 			}
+			// 冒号开头是 SSE 注释心跳；web/stream.ts 会忽略它，不把它当成业务事件。
 			const heartbeat = setInterval(() => {
 				if (!response.destroyed && !response.writableNeedDrain) response.write(": keepalive\n\n");
 			}, 15_000);
 			try {
 				await run.execute(async (event) => {
 					if (response.destroyed || response.writableEnded) return;
+					// 该次写入遇到背压时等 drain，再完成本次发送回调。
 					if (!response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)) {
 						await once(response, "drain", { signal: run.signal });
 					}

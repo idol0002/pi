@@ -1,3 +1,7 @@
+/**
+ * 带授权约束的数据访问层：知识库、文档元数据、授权表和会话。
+ * userId 来自 server.ts 验证过的会话，SQL 参数只用于缩小查询范围，不能授予权限。
+ */
 import { randomUUID } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
 import type { SqlClient } from "./database.ts";
@@ -9,6 +13,7 @@ export async function accessibleKnowledgeBases(
 	userId: string,
 	ids: string[] | null = null,
 ): Promise<KnowledgeBase[]> {
+	// 同一用户属于多个组时取最高角色；active 检查让停用账号/知识库不再返回。
 	const { rows } = await database.query<KnowledgeBase>(
 		`SELECT k.id, k.name, k.description, k.permission_version AS "permissionVersion",
 		        CASE MAX(CASE g.role WHEN 'admin' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END)
@@ -24,6 +29,7 @@ export async function accessibleKnowledgeBases(
 	return rows;
 }
 
+// 列表同时返回“当前生效版本”和“最新版本的处理状态”，用于展示更新失败但旧版仍可用的情况。
 const documentColumns = `d.id, d.knowledge_base_id AS "knowledgeBaseId", d.title,
 	CASE WHEN d.current_version_id IS NOT NULL THEN d.version END AS version,
 	d.media_type AS "mediaType", d.current_version_id AS "currentVersionId", d.latest_version_id AS "latestVersionId",
@@ -34,7 +40,7 @@ const documentColumns = `d.id, d.knowledge_base_id AS "knowledgeBaseId", d.title
 	COALESCE((SELECT j.total_pages FROM ingestion_jobs j WHERE j.version_id = d.latest_version_id), 0) AS "totalPages",
 	d.created_at AS "createdAt", d.updated_at AS "updatedAt"`;
 
-// Keep permission predicates in the content query, including direct document-ID reads.
+// 权限条件与正文查询放在同一条 SQL 中，直接猜文档 ID 也必须经过此约束。
 export const documentAccess = `FROM documents d JOIN knowledge_bases k ON k.id = d.knowledge_base_id
 	WHERE NOT d.deleted AND k.active AND EXISTS (
 		SELECT 1 FROM knowledge_base_grants g
@@ -83,6 +89,7 @@ export class KnowledgeStore {
 		id: string,
 		versionId: string | null = null,
 	): Promise<{ text: string; versionId: string }> {
+		// 未指定版本时读 current；显式版本允许读仍有权限的历史 ready 版本，维持旧引用可追溯。
 		const { rows } = await this.database.query<{ text: string; versionId: string }>(
 			`SELECT v.text, v.id AS "versionId" FROM document_versions v
 			 WHERE v.document_id = $2 AND v.status = 'ready' AND EXISTS (
@@ -123,6 +130,7 @@ export class KnowledgeStore {
 		grants: KnowledgeGrant[],
 	): Promise<{ permissionVersion: number }> {
 		return this.database.transaction(async (transaction) => {
+			// 对知识库行加排他锁，与文档写操作使用的共享锁协调授权变更时机。
 			await transaction.query("SELECT id FROM knowledge_bases WHERE id = $1 FOR UPDATE", [knowledgeBaseId]);
 			const [base] = await accessibleKnowledgeBases(transaction, userId, [knowledgeBaseId]);
 			if (!base) throw notFound();
@@ -135,6 +143,7 @@ export class KnowledgeStore {
 			if (groups.rows.length !== groupIds.length) {
 				throw new ApiError(400, "invalid_grants", "用户组不存在或重复");
 			}
+			// 至少保留一个包含有效账号的管理组，避免把知识库变成无人可以维护授权的状态。
 			const admins = await transaction.query(
 				`SELECT 1 FROM user_group_memberships m JOIN app_users u ON u.id = m.user_id
 				 WHERE u.active AND m.group_id = ANY($1::text[]) LIMIT 1`,
@@ -160,6 +169,7 @@ export class KnowledgeStore {
 	}
 
 	async createConversation(userId: string, title: string, knowledgeBaseIds: string[]): Promise<Conversation> {
+		// 创建时把选定知识库写入关联表，后续提问沿用此范围，不接受临时伪造的新范围。
 		return this.database.transaction(async (transaction) => {
 			const bases = await accessibleKnowledgeBases(transaction, userId, knowledgeBaseIds);
 			if (bases.length !== knowledgeBaseIds.length) throw notFound();
@@ -180,6 +190,7 @@ export class KnowledgeStore {
 	}
 
 	async listConversations(userId: string, id: string | null = null): Promise<Conversation[]> {
+		// 只有创建者本人且仍能访问会话的全部知识库，才能在历史列表中看到该会话。
 		const { rows } = await this.database.query<Conversation>(
 			`SELECT c.id, c.title, c.created_at AS "createdAt", c.updated_at AS "updatedAt",
 			        array_agg(ck.knowledge_base_id ORDER BY ck.knowledge_base_id) AS "knowledgeBaseIds"

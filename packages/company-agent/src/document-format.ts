@@ -1,3 +1,4 @@
+/** 上传的快速格式检查：扩展名选格式，文件签名排除明显不匹配，完整解析在后台继续执行。 */
 import { ApiError } from "./errors.ts";
 import { MAX_DOCUMENT_BYTES, MAX_TEXT_BYTES } from "./text-processing.ts";
 import type { DocumentMediaType } from "./types.ts";
@@ -19,6 +20,7 @@ export function documentFormat(filename: string): DocumentMediaType {
 }
 
 export function validateDocument(content: Uint8Array, mediaType: DocumentMediaType): void {
+	// 文本与二进制文档分别限额；合法 ZIP/PDF 头不代表内容一定可解析，不能跳过后续解析器。
 	const text = mediaType === "text/plain" || mediaType === "text/markdown";
 	if (content.byteLength > (text ? MAX_TEXT_BYTES : MAX_DOCUMENT_BYTES)) {
 		throw new ApiError(413, "file_too_large", text ? "文本文件不能超过 1 MiB" : "PDF 和 Word 文件不能超过 20 MiB");

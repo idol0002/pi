@@ -1,3 +1,7 @@
+/**
+ * 固定版本原文预览：校验来源 → 获取预览数据 → 可选 PDF 渲染 → 显示正文/复核表单。
+ * React 管页面状态；dialog、PDF 加载与 Canvas 渲染这些外部资源通过 ref/Effect 管理。
+ */
 import {
 	GlobalWorkerOptions,
 	getDocument,
@@ -46,6 +50,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 
 	useEffect(() => {
 		const element = dialog.current;
+		// 组件挂载与原生弹窗生命周期配对；实际关闭入口由父组件移除本组件。
 		if (element && !element.open) element.showModal();
 		return () => element?.close();
 	}, []);
@@ -53,6 +58,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 	useEffect(() => {
 		const controller = new AbortController();
 		let loading: PDFDocumentLoadingTask | undefined;
+		// 来源请求结束或组件切换后，只允许当前未取消的请求写入状态。
 		void (async () => {
 			try {
 				const path = sourcePath(source.path);
@@ -62,6 +68,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 				const documentId = match[1];
 				const versionId = url.searchParams.get("versionId");
 				const query = new URLSearchParams(versionId ? { versionId } : {});
+				// source.path 携带版本/行号定位；先请求结构化 preview，待复核版本会由后端检查维护权限。
 				const data = await api<DocumentPreview>(
 					`/api/documents/${documentId}/preview?${query}`,
 					"GET",
@@ -88,6 +95,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 				const response = await checkedFetch(`${pdfUrl.pathname}${pdfUrl.search}`, { signal: controller.signal });
 				const bytes = await response.arrayBuffer();
 				if (controller.signal.aborted) return;
+				// PDF 主线程/Worker 和辅助资源都来自本服务，不让文档内容选择外部资源地址。
 				loading = getDocument({
 					data: new Uint8Array(bytes),
 					cMapUrl: "/assets/pdfjs/cmaps/",
@@ -110,6 +118,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 			}
 		})();
 		return () => {
+			// 关闭会中止客户端等待和 PDF 加载；复核是否已提交仍以服务端状态为准。
 			controller.abort();
 			reviewRequest.current?.abort();
 			if (loading) void loading.destroy().catch(() => {});
@@ -117,6 +126,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 	}, [source.path, onError]);
 
 	const preview = loaded?.data;
+	// PDF 使用真实页数；未分页的 Word 复核按每组正文块展示，不能把它称为原件页码。
 	const pageCount =
 		pdf?.numPages ??
 		(preview?.pdfUrl
@@ -130,6 +140,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 		let task: RenderTask | undefined;
 		setPageLoading(true);
 		setCanvasReady(false);
+		// 同一 Canvas 不能同时跑两个渲染；先取消并等待上一个任务，再开始当前页。
 		const previous = rendering.current;
 		previous?.cancel();
 		void (async () => {
@@ -141,6 +152,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 				const target = canvas.current;
 				const base = documentPage.getViewport({ scale: 1 });
 				const available = Math.max(280, stage.current.clientWidth - 32);
+				// 显示清晰度受设备像素比与总像素上限约束，避免异常页面占用过多画布内存。
 				const scale = Math.min(
 					(available * Math.min(devicePixelRatio, 2)) / base.width,
 					Math.sqrt(8_000_000 / (base.width * base.height)),
@@ -156,6 +168,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 				if (context) {
 					context.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent");
 					context.globalAlpha = 0.18;
+					// 解析器保存归一化来源矩形，乘当前画布尺寸即可在不同分辨率下定位。
 					for (const location of source.locations) {
 						if (location.page !== currentPage || !location.box) continue;
 						const [left, top, right, bottom] = location.box;
@@ -199,6 +212,7 @@ export function DocumentViewer({ source, onClose, onPublished, onError }: Viewer
 			.join("\n");
 	const download = Boolean(preview?.pdfUrl || preview?.mediaType.includes("word"));
 	const publish = async () => {
+		// 修改按 blockId 收集，翻页不会丢失；服务端再次验证版本与块 ID 后才原子发布。
 		if (!loaded || !confirmed || loaded.data.blocks.length === 0 || reviewRequest.current) return;
 		const controller = new AbortController();
 		reviewRequest.current = controller;

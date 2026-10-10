@@ -1,3 +1,7 @@
+/**
+ * React 问答控制器：选择范围/会话 → 提交 → 读取增量 → 接收终态 → 回读持久化历史。
+ * useState 驱动显示；ref 保存当前任务与取消句柄，让异步回调确认自己是否仍有权更新页面。
+ */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessage, KnowledgeBase } from "../src/types.ts";
 import { api, checkedFetch, RequestError } from "./client.ts";
@@ -30,14 +34,17 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 	const [stopping, setStopping] = useState(false);
 	const [loading, setLoading] = useState(false);
 	const [stage, setStage] = useState("");
+	// epoch 区分组件生命周期，view 区分会话视图；A 请求晚于 B 返回时，旧序号不能覆盖 B。
 	const epoch = useRef(0);
 	const view = useRef(0);
+	// current 用于渲染，currentRef 供异步操作立即读取最近确认的会话，相关转换需同时维护。
 	const currentRef = useRef<BrowserConversation | undefined>(undefined);
 	const generationRef = useRef<Generation | undefined>(undefined);
 	const loadController = useRef<AbortController | undefined>(undefined);
 
 	useEffect(
 		() => () => {
+			// 退出登录等导致组件卸载时，取消流读取和历史回填，防止旧用户数据晚到。
 			epoch.current++;
 			loadController.current?.abort();
 			generationRef.current?.controller.abort();
@@ -52,6 +59,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 	}, [bases]);
 
 	const newConversation = useCallback(() => {
+		// 这里只清空本地草稿视图；真正的会话记录到首次发送时才由后端创建。
 		if (generationRef.current) return;
 		view.current++;
 		loadController.current?.abort();
@@ -68,6 +76,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 	const loadConversation = useCallback(
 		async (id: string) => {
 			if (generationRef.current) return;
+			// 同时取消旧请求并更新序号；取消减少工作，序号检查保护状态归属。
 			const version = ++view.current;
 			const session = epoch.current;
 			loadController.current?.abort();
@@ -98,6 +107,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 	);
 
 	const selectBase = useCallback((id: string, checked: boolean) => {
+		// 已有会话的知识范围固定；想换范围要新建问答，服务端也按此规则校验。
 		if (currentRef.current || generationRef.current) return;
 		setSelected((previous) => (checked ? [...new Set([...previous, id])] : previous.filter((item) => item !== id)));
 	}, []);
@@ -105,6 +115,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 	const submit = async () => {
 		const content = question.trim();
 		if (!content || selected.length === 0 || generationRef.current || loading) return;
+		// 先同步占住任务 ref，再更新 busy 界面，避免等待 React 重渲染期间重复发起请求。
 		const generation: Generation = { controller: new AbortController() };
 		generationRef.current = generation;
 		const session = epoch.current;
@@ -119,6 +130,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 		try {
 			let conversation = currentRef.current;
 			if (!conversation) {
+				// 第一次发送先拿到服务端 conversationId，后续消息都属于这个固定知识范围。
 				const result = await api<{ conversation: BrowserConversation }>(
 					"/api/conversations",
 					"POST",
@@ -135,6 +147,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 				setConversations((previous) => [result.conversation, ...previous]);
 			}
 			generation.conversationId = conversation.id;
+			// 先展示用户问题和助手占位；服务端终态与后续历史回读会给出正式消息内容/ID。
 			const placeholder: ChatMessage = {
 				id: crypto.randomUUID(),
 				runId: pendingId,
@@ -166,7 +179,9 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 				signal: generation.controller.signal,
 			});
 			if (session !== epoch.current || generationRef.current !== generation) return;
+			// HTTP 已接受流请求后再清空输入；失败会恢复本轮问题，便于用户重试。
 			setQuestion("");
+			// 这里处理状态与正文；最终来源以 done 的完整消息为准，而不是把增量直接当作已验证答案。
 			await readChatStream(response, (event) => {
 				if (session !== epoch.current || generationRef.current !== generation) return;
 				if (event.type === "start") generation.runId = event.runId;
@@ -177,6 +192,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 							: (event.note ?? `正在根据 ${event.sourceCount ?? 0} 段资料整理回答…`),
 					);
 				if (event.type === "delta")
+					// 用函数式更新读取最新状态，避免连续增量都基于同一份旧消息数组。
 					setMessages((previous) =>
 						previous.map((message) =>
 							message.id === pendingId ? { ...message, content: message.content + event.text } : message,
@@ -227,6 +243,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 			if (error instanceof RequestError && error.status === 401) onError(error);
 		} finally {
 			if (session === epoch.current && generationRef.current === generation) {
+				// 成功/失败/取消都回读服务端历史，将乐观占位与实际持久化状态对齐。
 				if (terminalError) setQuestion(content);
 				const controller = new AbortController();
 				generation.refreshController = controller;
@@ -280,6 +297,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 		setStopping(true);
 		setStage("正在停止生成…");
 		try {
+			// 已知 runId 时先取消后端精确任务；无论请求结果怎样，finally 都取消浏览器流读取。
 			if (generation.runId && generation.conversationId)
 				await api(
 					`/api/conversations/${encodeURIComponent(generation.conversationId)}/runs/${encodeURIComponent(generation.runId)}/cancel`,

@@ -1,3 +1,7 @@
+/**
+ * 文档入库 worker：领取任务 → 解析正文 → 发布或进入复核 → 继续下一项。
+ * 队列与重试次数在数据库中；active/currentJob 只是本进程的执行与取消句柄。
+ */
 import type { PGlite } from "@electric-sql/pglite";
 import { createDocumentParser, type DocumentParser } from "./document-parser.ts";
 import { MAX_INGESTION_ATTEMPTS } from "./documents.ts";
@@ -20,7 +24,7 @@ export interface IngestionOptions {
 	onError?: (error: unknown) => void;
 }
 
-/** A single local worker. The database owns queue state; wake-ups carry no document content. */
+/** 单个本地 worker；wake 只发出调度信号，文档内容始终从数据库里的任务读取。 */
 export class IngestionWorker {
 	private readonly database: PGlite;
 	private readonly options: IngestionOptions;
@@ -38,6 +42,7 @@ export class IngestionWorker {
 
 	async start(): Promise<void> {
 		if (this.running) return;
+		// 上次进程退出后留下的 processing 不会自己完成；按剩余次数恢复为 queued 或 failed。
 		await this.database.transaction(async (transaction) => {
 			await transaction.query(
 				`UPDATE ingestion_jobs SET status = CASE WHEN attempts < $1 THEN 'queued' ELSE 'failed' END,
@@ -57,6 +62,7 @@ export class IngestionWorker {
 	}
 
 	wake(): void {
+		// 执行中收到新任务时先记住唤醒请求，既不并发启动第二个 drain，也不丢掉新增任务。
 		this.wakeRequested = true;
 		if (!this.running || this.active) return;
 		this.active = this.drain()
@@ -78,12 +84,14 @@ export class IngestionWorker {
 	}
 
 	cancelDocument(documentId: string): void {
+		// 删除当前正在解析的文档时，将取消信号一直传递到解析子进程。
 		if (this.currentJob?.documentId === documentId) {
 			this.currentJob.controller.abort(new ApiError(499, "document_deleted", "文档已删除，解析已停止"));
 		}
 	}
 
 	private async purgeDeleted(): Promise<void> {
+		// 删除版本会通过外键级联清理片段等内容；消息来源 ID 仍保留，供历史失效判断。
 		await this.database.transaction(async (transaction) => {
 			await transaction.query(
 				`UPDATE documents SET current_version_id = NULL, latest_version_id = NULL, source_text = ''
@@ -109,6 +117,7 @@ export class IngestionWorker {
 	}
 
 	private async claim(): Promise<ClaimedJob | undefined> {
+		// 领取和增加 attempts 在同一事务内完成，后续执行失败也会计入次数上限。
 		return this.database.transaction(async (transaction) => {
 			const { rows } = await transaction.query<ClaimedJob>(
 				`SELECT j.id, j.version_id AS "versionId", j.document_id AS "documentId", v.source_bytes AS content,
@@ -135,6 +144,7 @@ export class IngestionWorker {
 		const controller = new AbortController();
 		this.currentJob = { documentId: job.documentId, controller };
 		try {
+			// 解析器返回统一的正文/分块/位置/警告；progress 单独写入数据库供页面轮询。
 			const parsed = await this.parse(job.content, job.mediaType, {
 				signal: controller.signal,
 				progress: async (progress) => {
@@ -151,6 +161,7 @@ export class IngestionWorker {
 				"UPDATE ingestion_jobs SET stage = 'indexing' WHERE id = $1 AND status = 'processing'",
 				[job.id],
 			);
+			// 解析可能很慢：发布前再检查是否被删除、任务是否取消以及是否仍为最新版本。
 			await this.database.transaction(async (transaction) => {
 				const { rows } = await transaction.query(
 					`SELECT j.id FROM ingestion_jobs j JOIN documents d ON d.id = j.document_id
@@ -164,6 +175,7 @@ export class IngestionWorker {
 		} catch (error) {
 			if (!(error instanceof ApiError)) this.options.onError?.(error);
 			const message = error instanceof ApiError ? error.message : "文档处理失败，请重试";
+			// 服务关闭导致的中断可按剩余次数重新排队；普通解析错误先记录失败，等待维护者处理。
 			const retry = error instanceof ApiError && error.code === "parse_interrupted";
 			await this.database.transaction(async (transaction) => {
 				const result = await transaction.query(

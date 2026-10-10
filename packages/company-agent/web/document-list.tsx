@@ -1,3 +1,7 @@
+/**
+ * 文档列表只展示元数据并发出动作，网络请求在 management.tsx。
+ * status 是最新版本状态，version/currentVersionId 是生效版本，所以“更新失败”时仍可能有原文。
+ */
 import type { KnowledgeBase } from "../src/types.ts";
 import type { BrowserDocument } from "./types.ts";
 

@@ -1,3 +1,4 @@
+/** 问答显示层：草稿、提示、消息列表和滚动；网络与生成状态交由 useChat 管理。 */
 import { useLayoutEffect, useRef } from "react";
 import type { KnowledgeBase, ModelInfo } from "../src/types.ts";
 import { Message } from "./messages.tsx";
@@ -19,6 +20,7 @@ export function ChatPanel({ active, bases, model, chat, onSource }: ChatPanelPro
 	const conversationId = chat.current?.id;
 	const lastConversation = useRef(conversationId);
 	useLayoutEffect(() => {
+		// DOM 更新后、绘制前校正滚动位置；只有用户仍在跟随底部时才随增量滚动。
 		if (lastConversation.current !== conversationId) {
 			lastConversation.current = conversationId;
 			following.current = true;
@@ -27,6 +29,7 @@ export function ChatPanel({ active, bases, model, chat, onSource }: ChatPanelPro
 			scroll.current.scrollTop = scroll.current.scrollHeight;
 	}, [active, chat.messages, conversationId]);
 	const draft = (text: string) => {
+		// 建议问题和重试按钮只预填草稿，不立即触发模型请求。
 		chat.setQuestion(text);
 		input.current?.focus();
 	};

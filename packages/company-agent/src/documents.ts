@@ -1,3 +1,7 @@
+/**
+ * 文档业务入口：接收原件、创建版本/任务、读取来源、复核发布以及关键词候选检索。
+ * upload 只负责持久化和入队；真正的解析由 ingestion.ts 异步执行。
+ */
 import { createHash, randomUUID } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
 import type { SqlClient } from "./database.ts";
@@ -35,6 +39,7 @@ export const chunkColumns = `c.id, d.id AS "documentId", d.knowledge_base_id AS 
 	c.start_line AS "startLine", c.end_line AS "endLine", c.start_offset AS "startOffset", c.end_offset AS "endOffset", c.locations`;
 
 export function withSourceUrl<T extends Omit<DocumentChunk, "sourceUrl">>(chunk: T): T & { sourceUrl: string } {
+	// 引用固定到版本和行号；更新文档后，旧回答仍然能定位其当时使用的原文。
 	const query = new URLSearchParams({
 		versionId: chunk.versionId,
 		startLine: String(chunk.startLine),
@@ -64,7 +69,7 @@ async function editableDocument(
 	);
 	if (!found.rows[0]) throw notFound();
 	const { knowledgeBaseId } = found.rows[0];
-	// Grant replacement takes an exclusive lock on this same row.
+	// 先锁知识库再锁文档：与授权替换的排他锁协调，并串行化同一文档的写操作。
 	await database.query("SELECT id FROM knowledge_bases WHERE id = $1 FOR SHARE", [knowledgeBaseId]);
 	await requireEditor(database, userId, knowledgeBaseId);
 	const { rows } = await database.query<{ title: string; latestVersionId: string }>(
@@ -76,6 +81,7 @@ async function editableDocument(
 }
 
 async function checkQueueCapacity(database: SqlClient): Promise<void> {
+	// 只计算排队/处理中的任务；需要人工复核的版本不会持续占用解析执行名额。
 	const { rows } = await database.query<{ count: number }>(
 		"SELECT count(*)::int AS count FROM ingestion_jobs WHERE status IN ('queued', 'processing')",
 	);
@@ -107,6 +113,7 @@ export class DocumentService {
 		target: { knowledgeBaseId: string } | { documentId: string },
 		input: DocumentUpload,
 	): Promise<UploadReceipt> {
+		// 1. 在入库前校验文件名、格式、大小和标题，深度格式解析留给后台解析器。
 		if (!input.filename || input.filename.length > 255 || /[\\/\x00-\x1f\x7f]/.test(input.filename)) {
 			throw new ApiError(400, "invalid_filename", "请提供不含路径的文件名，长度不超过 255 个字符");
 		}
@@ -126,6 +133,7 @@ export class DocumentService {
 			let title: string;
 			let version = 1;
 			if ("documentId" in target) {
+				// 更新原文档时创建新版本，不覆盖已经发布的旧版本。
 				documentId = target.documentId;
 				const document = await editableDocument(transaction, userId, documentId);
 				const { rows } = await transaction.query<{ version: number; status: string }>(
@@ -155,6 +163,7 @@ export class DocumentService {
 				);
 			}
 			await checkQueueCapacity(transaction);
+			// 2. 原件、版本和任务在同一事务内建立；任一写入失败就整体回滚。
 			const versionId = randomUUID();
 			const jobId = randomUUID();
 			await transaction.query(
@@ -178,6 +187,7 @@ export class DocumentService {
 				"INSERT INTO ingestion_jobs (id, version_id, document_id, status) VALUES ($1, $2, $3, 'queued')",
 				[jobId, versionId, documentId],
 			);
+			// 3. 此时只推进 latest；current 要等解析/复核与关键词索引发布成功后再切换。
 			await transaction.query(
 				"UPDATE documents SET latest_version_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
 				[documentId, versionId],
@@ -207,6 +217,7 @@ export class DocumentService {
 	}
 
 	async retryJob(userId: string, id: string): Promise<UploadReceipt> {
+		// 复用最新失败/待复核版本的任务，并保留累计执行次数；旧版本不能被迟到的重试重新发布。
 		return this.database.transaction(async (transaction) => {
 			const { rows } = await transaction.query<IngestionJob>(
 				`SELECT ${jobColumns} FROM ingestion_jobs j WHERE j.id = $1`,
@@ -233,6 +244,7 @@ export class DocumentService {
 	}
 
 	async deleteDocument(userId: string, id: string): Promise<void> {
+		// 先逻辑删除，立即让授权查询排除此文档；worker 随后清理原件、分块和索引。
 		await this.database.transaction(async (transaction) => {
 			await editableDocument(transaction, userId, id);
 			await transaction.query("UPDATE documents SET deleted = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1", [
@@ -269,6 +281,7 @@ export class DocumentService {
 		versionId: string | null,
 		read: (transaction: SqlClient, version: PreviewVersion) => Promise<T>,
 	): Promise<T> {
+		// 原文预览、PDF 和下载共用访问规则：ready 版本可读，最新 needs_review 仅维护者可读。
 		return this.database.transaction(async (transaction) => {
 			const { rows } = await transaction.query<
 				PreviewVersion & {
@@ -328,6 +341,7 @@ export class DocumentService {
 		versionId: string,
 		changes: { blockId: string; text: string }[],
 	): Promise<void> {
+		// 版本号与正文块 ID 都重新验证，防止旧复核表单覆盖后来上传的版本。
 		await this.database.transaction(async (transaction) => {
 			const document = await editableDocument(transaction, userId, documentId);
 			if (document.latestVersionId !== versionId)
@@ -345,6 +359,7 @@ export class DocumentService {
 			) {
 				throw new ApiError(400, "invalid_review", "复核内容包含重复或不存在的正文块");
 			}
+			// 修改识别正文后重新组合分块；上传的原件字节不会因人工校对而改变。
 			const blocks = version.blocks.map((block) => {
 				const change = changes.find((item) => item.blockId === block.id);
 				return change ? { ...block, text: change.text.replace(/\r\n?/g, "\n").trim() } : block;
@@ -375,6 +390,7 @@ export class DocumentService {
 		input: SearchRequest,
 		options: { plan?: SearchPlan; baseline?: boolean; candidates?: boolean } = {},
 	): Promise<SearchHit[]> {
+		// 查询参数和整个请求知识范围先验证，再从有权限的 current/ready 版本中选候选。
 		if (typeof input.query !== "string" || !input.query.trim() || input.query.length > 300) {
 			throw new ApiError(400, "invalid_query", "query 必须是 1 到 300 个字符的文本");
 		}
@@ -400,7 +416,7 @@ export class DocumentService {
 			if ((await accessibleKnowledgeBases(this.database, userId, ids)).length !== ids.length) throw notFound();
 		}
 		if (terms.length === 0) return [];
-		// Every term contains letters/numbers only; user text never becomes SQL or raw tsquery syntax.
+		// 分词结果只含字母/数字；SQL 使用绑定参数，原始用户文本不会作为 SQL 或 tsquery 语法执行。
 		const query = terms.map((term) => `'${term}'`).join(" | ");
 		const { rows } = await this.database.query<Omit<SearchHit, "sourceUrl">>(
 			`WITH allowed_documents AS (
@@ -413,6 +429,7 @@ export class DocumentService {
 			 WHERE (c.search_vector @@ query OR d.id = ANY($5::text[])) ORDER BY score DESC, d.id, c.position LIMIT $4`,
 			[userId, ids, query, options.baseline ? limit : 80, options.baseline ? [] : plan.contextDocumentIds],
 		);
+		// 普通路径先多取候选再按业务信号重排；baseline 只供评测对比原始关键词排名。
 		const hits = rows.map(withSourceUrl);
 		if (options.baseline) return hits;
 		const ranked = rankKeywordHits(hits, plan);

@@ -1,3 +1,4 @@
+/** 登录表单只管理输入与提交状态；真正的登录和工作空间加载由 App 提供的 onLogin 完成。 */
 import { useState } from "react";
 
 interface LoginProps {
@@ -50,6 +51,7 @@ export function Login({ error, onLogin }: LoginProps) {
 						event.preventDefault();
 						if (busy) return;
 						setBusy(true);
+						// 无论成功失败都清空密码；会话保存在浏览器 Cookie，而不是这个组件的密码状态中。
 						void onLogin(username.trim(), password).finally(() => {
 							setPassword("");
 							setBusy(false);

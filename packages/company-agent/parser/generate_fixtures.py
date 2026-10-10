@@ -1,4 +1,5 @@
 """Generate small, synthetic parser fixtures. Never uses company documents."""
+# 学习辅助：生成测试用的文字页、扫描页、旋转页和 Word 表格/图片，不参与应用启动。
 import argparse
 import io
 from pathlib import Path
@@ -12,6 +13,7 @@ from reportlab.pdfgen import canvas
 
 
 def scan_image():
+    # 将文字画进图片，测试解析器是否真正走 OCR，而不是只读到了 PDF 文字层。
     image = Image.new("RGB", (1240, 1754), "white")
     draw = ImageDraw.Draw(image)
     chinese = Path("C:/Windows/Fonts/msyh.ttc")
@@ -28,6 +30,7 @@ def scan_image():
 
 
 def make_pdf(path, mode, image):
+    # 用同一套合成内容组合不同版式，便于比较文本提取、OCR 与错误路径。
     document = canvas.Canvas(str(path), pagesize=(612, 792), encrypt=StandardEncryption("locked-fixture") if mode == "encrypted" else None)
     document.setTitle("Synthetic knowledge parser fixture")
     if mode in ("text", "mixed", "encrypted"):

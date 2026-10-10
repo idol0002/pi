@@ -1,3 +1,7 @@
+/**
+ * 学习与回归工具：在独立内存数据库中对比关键词基线和优化检索流程。
+ * 不参与应用启动，不衡量生成答案正确率；只有显式 --hybrid 才启用向量服务。
+ */
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +34,7 @@ interface Score {
 }
 
 function validate(value: unknown): Dataset {
+	// 先校验样本与预期来源的引用关系，避免无效标注让指标失去意义。
 	if (
 		!value ||
 		typeof value !== "object" ||
@@ -98,9 +103,10 @@ async function run(): Promise<void> {
 	);
 	if ((await stat(datasetPath)).size > 32 * 1024 * 1024) throw new Error("评测文件超过 32 MiB");
 	const dataset = validate(JSON.parse(await readFile(datasetPath, "utf8")));
-	// Network is opt-in even when the app's .env enables a real model.
+	// 即使应用环境已经配置真实模型，默认评测也不会自动发起外部模型调用。
 	const embedding = args.includes("--hybrid") ? createEmbeddingModel() : undefined;
 	if (args.includes("--hybrid") && !embedding) throw new Error("--hybrid 需要先配置并启用向量模型");
+	// 不传数据目录，确保后面的清理和样本写入只影响这次独立评测。
 	const database = await openDatabase();
 	const documents = new DocumentService(database);
 	const worker = new IngestionWorker(database);
@@ -131,6 +137,7 @@ async function run(): Promise<void> {
 		const results: { key: string; expected: string[]; baseline: Score; optimized: Score }[] = [];
 		for (const question of dataset.questions) {
 			const userId = `user-${question.user}`;
+			// 基线与优化共享相同文档和员工身份；差别来自查询规划、排序等检索步骤。
 			const baseline = await documents.search(userId, { query: question.query, limit: 5 }, { baseline: true });
 			const context = question.previousQuestion
 				? await retrieval.search(userId, { query: question.previousQuestion, limit: 5 })
@@ -143,6 +150,7 @@ async function run(): Promise<void> {
 			const optimized = plan.keywordQuery
 				? (await retrieval.search(userId, { query: plan.keywordQuery, limit: 5 }, { plan })).hits
 				: [];
+			// 正例检查预期来源及可选摘录是否找到；负例要求空结果，不给负例计算平均召回率。
 			const score = (hits: SearchHit[]): Score => {
 				const sourceKeys = hits.map((hit) => keyById.get(hit.documentId) ?? "unexpected-source");
 				if (question.expected.length === 0)
@@ -166,6 +174,7 @@ async function run(): Promise<void> {
 				optimized: score(optimized),
 			});
 		}
+		// Recall/MRR 只在有依据问题上平均；correct 不惩罚正例中的所有额外无关片段。
 		const summarize = (method: "baseline" | "optimized") => {
 			const positives = results.filter((row) => row.expected.length > 0);
 			const negatives = results.filter((row) => row.expected.length === 0);

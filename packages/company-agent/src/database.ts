@@ -1,3 +1,7 @@
+/**
+ * 数据库生命周期：打开 PGlite、按版本迁移、为首次启动写入合成数据。
+ * 业务模块通过依赖注入取得连接；传给函数的 SqlClient 也可以是事务内的连接。
+ */
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import { initializeDocumentVersions } from "./document-index.ts";
@@ -7,6 +11,7 @@ import { hashPassword } from "./password.ts";
 export type SqlClient = Pick<PGlite, "query">;
 
 export async function migrate(database: PGlite): Promise<void> {
+	// schema_migrations 记录已执行版本；迁移内容定义在 migrations.ts，按顺序执行一次。
 	await database.exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version INTEGER PRIMARY KEY,
@@ -16,6 +21,7 @@ export async function migrate(database: PGlite): Promise<void> {
 	await database.transaction(async (transaction) => {
 		const { rows } = await transaction.query<{ version: number }>("SELECT version FROM schema_migrations");
 		const applied = new Set(rows.map((row) => row.version));
+		// 老应用不能猜测新数据库的结构，所以遇到更高版本时直接停止启动。
 		if (rows.some((row) => row.version > migrations[migrations.length - 1].version)) {
 			throw new Error("数据库版本比应用新，请使用对应版本的应用");
 		}
@@ -29,6 +35,7 @@ export async function migrate(database: PGlite): Promise<void> {
 }
 
 export async function openDatabase(dataDirectory?: string): Promise<PGlite> {
+	// 有路径时持久化；测试省略路径时使用内存库。vector 扩展为后续向量表提供类型和运算。
 	const database = new PGlite({ dataDir: dataDirectory, extensions: { vector } });
 	try {
 		await database.waitReady;
@@ -40,11 +47,12 @@ export async function openDatabase(dataDirectory?: string): Promise<PGlite> {
 	}
 }
 
-/** Bootstrap an empty development database. Restarting never restores revoked grants or resets passwords. */
+/** 仅为空开发库初始化账号和资料；重启不能恢复已撤销的授权，也不能重置已有密码。 */
 export async function seedDemo(database: PGlite, password: string): Promise<boolean> {
 	if (password.length < 12 || password.length > 256) {
 		throw new Error("测试账号密码长度必须为 12 到 256 个字符");
 	}
+	// 两个账号即使使用相同测试密码，也分别生成随机盐。
 	const hashes = await Promise.all([hashPassword(password), hashPassword(password)]);
 	return database.transaction(async (transaction) => {
 		const existing = await transaction.query("SELECT id FROM app_users LIMIT 1");
@@ -73,6 +81,7 @@ export async function seedDemo(database: PGlite, password: string): Promise<bool
 				"# 费用报销流程（合成示例）\n\n员工提交费用说明和凭证，经部门负责人审核后交财务复核。\n",
 			],
 		);
+		// 合成文档也走版本化与分块索引逻辑，避免演示数据绕过真实检索链路。
 		await initializeDocumentVersions(transaction);
 		return true;
 	});

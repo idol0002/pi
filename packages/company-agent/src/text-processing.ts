@@ -1,9 +1,14 @@
+/**
+ * 纯文本处理：严格解码 → 统一换行 → 识别章节 → 有界分块 → 保存原文位置。
+ * 同时提供索引/查询共用的中英文分词；不调用数据库或生成模型。
+ */
 import { ApiError } from "./errors.ts";
 import type { DocumentMediaType, DocumentPage, ParsedBlock, ParseWarning, TextChunk } from "./types.ts";
 
 export const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_TEXT_BYTES = 1024 * 1024;
 export const MAX_CHUNKS = 2048;
+// 长度单位为 JavaScript 的 UTF-16 单元，不是模型 token；重叠只发生在同一章节内。
 export const CHUNK_SIZE = 1200;
 export const CHUNK_OVERLAP = 160;
 
@@ -18,7 +23,7 @@ export interface ParsedDocument {
 
 const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
 
-/** Keep the same tokenizer for indexing and queries, including Chinese bigrams. */
+/** 索引与查询复用同一分词器；中文补充相邻双字词，减少不同分词边界造成的漏检。 */
 export function searchTerms(text: string): string[] {
 	const terms = new Set<string>();
 	const normalized = text.normalize("NFKC").toLowerCase();
@@ -63,6 +68,7 @@ export function parseTextDocument(
 	const headings: string[] = [];
 	let fence: { character: string; length: number } | undefined;
 	let offset = 0;
+	// 先保存每行起点与章节边界；代码围栏中的 # 属于代码，不当作 Markdown 标题。
 	for (const line of text.split("\n")) {
 		if (mediaType === "text/markdown") {
 			const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
@@ -87,6 +93,7 @@ export function parseTextDocument(
 		if (offset <= text.length) lineStarts.push(offset);
 	}
 	function lineAt(position: number): number {
+		// 用二分查找将偏移转换成从 1 开始的行号，避免每个块都重新扫描此前全部正文。
 		let low = 0;
 		let high = lineStarts.length;
 		while (low + 1 < high) {
@@ -105,6 +112,7 @@ export function parseTextDocument(
 		while (start < sectionEnd) {
 			let end = Math.min(start + chunkSize, sectionEnd);
 			if (end < sectionEnd) {
+				// 在长度上限内优先找段落、换行和句子边界，兼顾块大小与语义连续性。
 				const minimum = start + Math.floor(chunkSize / 2);
 				const paragraph = text.lastIndexOf("\n\n", end - 2) + 2;
 				const newline = text.lastIndexOf("\n", end - 1) + 1;
@@ -116,7 +124,7 @@ export function parseTextDocument(
 					if (boundary) end = minimum + boundary.index + boundary[0].length;
 				}
 			}
-			// A Unicode character must never be split between two UTF-16 surrogate halves.
+			// 避免切开 UTF-16 代理对，例如部分生僻字和表情由两个编码单元共同表示。
 			if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end])) end--;
 			const chunkText = text.slice(start, end);
 			if (chunkText.trim()) {
@@ -133,6 +141,7 @@ export function parseTextDocument(
 					throw new ApiError(422, "too_many_chunks", "文档分块超过 2048 个，请拆分文档");
 			}
 			if (end === sectionEnd) break;
+			// 下一块保留有限重叠，边界附近的信息不至于只剩半段；同时确保游标一直前进。
 			start = Math.max(start + 1, end - overlap);
 			if (/[\uDC00-\uDFFF]/.test(text[start])) start++;
 		}

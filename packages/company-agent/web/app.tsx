@@ -1,3 +1,7 @@
+/**
+ * 网页总入口：恢复登录 → 登录表单或工作空间 → 问答/管理/原文预览。
+ * 页面只保存交互状态，权限和持久化事实以服务端返回为准。
+ */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KnowledgeBase, ModelInfo, User } from "../src/types.ts";
 import { ChatPanel } from "./chat-panel.tsx";
@@ -19,6 +23,7 @@ import type {
 import { useChat } from "./use-chat.ts";
 
 async function loadWorkspace(signal: AbortSignal): Promise<WorkspaceData> {
+	// 四项读取相互独立，可以并发；共用取消信号，避免退出后继续装载旧用户数据。
 	const [identity, knowledge, history, configuration] = await Promise.all([
 		api<{ user: User }>("/api/me", "GET", undefined, signal),
 		api<{ knowledgeBases: KnowledgeBase[] }>("/api/knowledge-bases", "GET", undefined, signal),
@@ -41,6 +46,7 @@ export function App() {
 	const controller = useRef<AbortController | undefined>(undefined);
 	const notify = useCallback<Notify>((message, success = false) => setNotice({ message, success }), []);
 	const report = useCallback<ReportError>((error) => {
+		// 401 会卸载整个 Workspace，其 Hooks 的清理逻辑随后取消问答、轮询和原文请求。
 		if (error instanceof RequestError && error.status === 401) {
 			controller.current?.abort();
 			setWorkspace(undefined);
@@ -50,6 +56,7 @@ export function App() {
 	}, []);
 
 	useEffect(() => {
+		// 刷新页面时先尝试用浏览器已有的会话 Cookie 恢复工作空间；未登录则显示 Login。
 		const request = new AbortController();
 		controller.current = request;
 		void loadWorkspace(request.signal)
@@ -70,6 +77,7 @@ export function App() {
 	}, []);
 
 	const login = async (username: string, password: string) => {
+		// 登录响应通过 HttpOnly Cookie 建立会话，随后重新读取服务端允许的知识库和历史。
 		controller.current?.abort();
 		const request = new AbortController();
 		controller.current = request;
@@ -125,6 +133,7 @@ interface WorkspaceProps {
 }
 
 function Workspace({ initial, notice, notify, onError, onLogout }: WorkspaceProps) {
+	// page 只切换可见面板；组件继续挂载，因此到管理页查看文档不会丢掉问答状态。
 	const [bases, setBases] = useState(initial.knowledgeBases);
 	const [page, setPage] = useState<WorkspacePage>("chat");
 	const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -143,9 +152,11 @@ function Workspace({ initial, notice, notify, onError, onLogout }: WorkspaceProp
 		onError,
 		onNavigate: navigateChat,
 	});
+	// 每次打开生成独立 key，旧预览卸载并清理请求，避免同一组件混入不同原文的异步结果。
 	const openSource = useCallback<OpenSource>((request) => setSource({ ...request, id: crypto.randomUUID() }), []);
 	const closeSource = useCallback(() => setSource(undefined), []);
 	const published = useCallback(() => {
+		// 原文弹窗完成复核后，通过修订号通知管理区刷新，避免让预览组件直接修改文档列表。
 		setDocumentRevision((revision) => revision + 1);
 		notify("复核完成，文档已可用于问答。", true);
 	}, [notify]);

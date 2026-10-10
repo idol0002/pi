@@ -1,3 +1,7 @@
+/**
+ * 向量模型适配器：校验配置 → 有界调用兼容接口 → 验证并归一化向量。
+ * 与生成模型独立开关；启用后后台索引和查询向量化都可能调用配置的服务。
+ */
 import { createHash } from "node:crypto";
 import { ApiError } from "./errors.ts";
 
@@ -8,7 +12,7 @@ export interface EmbeddingModel {
 	embed: (input: string[], signal: AbortSignal) => Promise<number[][]>;
 }
 
-/** Explicit opt-in: filling credentials while mode=off never starts document transmission. */
+/** mode=off 时直接返回，不会因为填写了密钥就自动开始发送文档。 */
 export function createEmbeddingModel(
 	env: Record<string, string | undefined> = process.env,
 ): EmbeddingModel | undefined {
@@ -54,6 +58,7 @@ export function createEmbeddingModel(
 		throw new Error("向量配置无效：维度为 1–4096，时限为 1000–60000 ms，相似度为 -1 到 1");
 	}
 	const baseUrl = base.href.replace(/\/$/, "");
+	// 影响向量空间的配置用于索引身份；只改超时、密钥或筛选阈值不会改变此身份。
 	const profileId = createHash("sha256")
 		.update(JSON.stringify([baseUrl, name, dimensions ?? null, env.KNOWLEDGE_EMBEDDING_REVISION?.trim() || "1"]))
 		.digest("hex");
@@ -62,6 +67,7 @@ export function createEmbeddingModel(
 		profileId,
 		minSimilarity,
 		async embed(input, signal) {
+			// 同时约束条数、单条长度、批次总量；这是调用边界，不是模型训练过程。
 			if (
 				input.length === 0 ||
 				input.length > 16 ||
@@ -71,6 +77,7 @@ export function createEmbeddingModel(
 				throw new ApiError(400, "embedding_input_limit", "向量输入超过批次或长度限制");
 			}
 			signal.throwIfAborted();
+			// 调用方取消和单次超时任一发生，都应结束本次请求。
 			const timeout = AbortSignal.timeout(timeoutMs);
 			try {
 				const response = await fetch(`${baseUrl}/embeddings`, {
@@ -96,6 +103,7 @@ export function createEmbeddingModel(
 					}
 					throw new ApiError(502, "embedding_unavailable", "向量服务调用失败，请检查服务端配置");
 				}
+				// 边读边限制响应字节数，不能先无上限 response.json() 再检查数组大小。
 				const reader = response.body.getReader();
 				const decoder = new TextDecoder("utf-8", { fatal: true });
 				let body = "";
@@ -127,6 +135,7 @@ export function createEmbeddingModel(
 }
 
 export function validateEmbeddings(value: unknown, count: number, dimensions?: number): number[][] {
+	// 服务可能乱序返回结果，先按 index 收集；重复、缺失、非有限数、维度变化都拒绝入库。
 	const invalid = () => new ApiError(502, "invalid_embeddings", "向量服务返回的数量、维度或数值无效");
 	if (
 		!value ||
@@ -158,6 +167,7 @@ export function validateEmbeddings(value: unknown, count: number, dimensions?: n
 		const vector = item.embedding as number[];
 		size ??= vector.length;
 		if (vector.length !== size) throw invalid();
+		// 归一化前排除零向量和异常范数，保证后续余弦距离具有可用输入。
 		const norm = Math.hypot(...vector);
 		if (!Number.isFinite(norm) || norm <= 1e-12) throw invalid();
 		vectors.set(

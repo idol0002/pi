@@ -1,3 +1,7 @@
+/**
+ * 把统一分块写入数据库并生成关键词索引；解析器只负责提供块和位置，不直接操作数据库。
+ * 这里的 tsvector/GIN 走词项检索，可选的向量索引在 vector-index.ts 中单独维护。
+ */
 import { createHash, randomUUID } from "node:crypto";
 import type { SqlClient } from "./database.ts";
 import { parseTextDocument, searchTerms } from "./text-processing.ts";
@@ -9,12 +13,14 @@ export async function writeChunks(
 	title: string,
 	chunks: TextChunk[],
 ): Promise<void> {
+	// 一批块生成 JSON 记录后通过 jsonb_to_recordset 写入，位置索引与正文偏移一并保留。
 	const records = chunks.map((chunk) => ({
 		...chunk,
 		id: randomUUID(),
 		terms: searchTerms(chunk.text).join(" "),
 		headingTerms: searchTerms(chunk.heading ?? "").join(" "),
 	}));
+	// 标题/章节与正文分别赋权；之后 documents.search 取候选，search-ranking 再做业务重排。
 	await database.query(
 		`INSERT INTO document_chunks (id, version_id, position, text, heading, start_line, end_line,
 		                             start_offset, end_offset, search_vector)
@@ -27,7 +33,7 @@ export async function writeChunks(
 	);
 }
 
-/** Upgrade the phase-one examples and seed fresh databases through the same parser and index. */
+/** 旧数据升级与首次合成数据初始化复用同一套版本、解析和索引路径。 */
 export async function initializeDocumentVersions(database: SqlClient): Promise<void> {
 	const { rows } = await database.query<{
 		id: string;

@@ -1,3 +1,7 @@
+/**
+ * 把业务层的 question/history/evidence 转换为一次 Pi 调用。
+ * 检索与权限由 chat.ts 先处理；这里不让模型自主扩大知识范围或调用文件/Shell 工具。
+ */
 import { setTimeout as delay } from "node:timers/promises";
 import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream, type TextContent } from "@earendil-works/pi-ai";
@@ -25,6 +29,7 @@ export interface AnswerModel {
 	generate(input: AnswerInput): Promise<{ content: string; usage: ModelUsage | null }>;
 }
 
+// 提示词声明资料属于数据；真正的访问边界仍依赖检索与交付阶段的服务端权限检查。
 const SYSTEM_PROMPT = `你是公司的内部知识库问答助手。使用用户问题的语言回答。
 只根据本次提供的 sources 回答事实问题；资料不足时明确说未找到足够依据，不得凭常识补全公司制度。
 每个基于资料的结论使用 [1] 这样的引用编号，只能使用 sources 中真实存在的 number。
@@ -38,6 +43,7 @@ export function createAnswerModel(config: ModelConfig): AnswerModel {
 		timeoutMs: config.timeoutMs,
 		async generate(input) {
 			input.signal.throwIfAborted();
+			// 演示与真实模式实现同一流接口；演示摘录仍来自真实检索结果。
 			const streamFn: StreamFn =
 				config.mode === "demo"
 					? demoStream(config, input.evidence)
@@ -50,6 +56,7 @@ export function createAnswerModel(config: ModelConfig): AnswerModel {
 								maxRetries: 0,
 								cacheRetention: "none",
 							});
+			// 每轮新建 Agent，历史从已重新鉴权的业务数据传入，避免不同员工共享内存上下文。
 			const agent = new Agent({
 				initialState: { model: config.model, systemPrompt: SYSTEM_PROMPT, tools: [] },
 				streamFn,
@@ -58,6 +65,7 @@ export function createAnswerModel(config: ModelConfig): AnswerModel {
 			const abort = () => agent.abort();
 			input.signal.addEventListener("abort", abort, { once: true });
 			let deliveryError: unknown;
+			// 将 Pi 的文本增量接到 chat.ts 的 onText，由其检查权限后再发送浏览器事件。
 			const unsubscribe = agent.subscribe(async (event) => {
 				if (event.type !== "message_update" || event.assistantMessageEvent.type !== "text_delta") return;
 				try {
@@ -69,6 +77,7 @@ export function createAnswerModel(config: ModelConfig): AnswerModel {
 				}
 			});
 			try {
+				// 使用结构化资料包传入问题、历史和编号来源，不把文档内容拼成系统角色消息。
 				await agent.prompt(
 					JSON.stringify({
 						question: input.question,
@@ -84,6 +93,7 @@ export function createAnswerModel(config: ModelConfig): AnswerModel {
 				);
 				if (deliveryError) throw deliveryError;
 				input.signal.throwIfAborted();
+				// 增量结束后读取完整助手消息，确认确实正常停止，再返回正文与供应商用量。
 				const final = agent.state.messages.at(-1);
 				if (final?.role !== "assistant" || final.stopReason !== "stop") {
 					// Provider errors can echo credentials or document text. Never expose them to clients or logs.
@@ -108,6 +118,7 @@ export function createAnswerModel(config: ModelConfig): AnswerModel {
 }
 
 function demoStream(config: ModelConfig, evidence: AnswerEvidence[]): StreamFn {
+	// 合成演示只模拟流式节奏，不调用外部生成服务，也不伪造 token 用量。
 	return (_model, _context, options) => {
 		const stream = createAssistantMessageEventStream();
 		const block: TextContent = { type: "text", text: "" };
@@ -131,7 +142,7 @@ function demoStream(config: ModelConfig, evidence: AnswerEvidence[]): StreamFn {
 		const text = [
 			"当前为演示模式，以下是检索到的资料摘录，尚未调用生成模型：",
 			...evidence.slice(0, 3).map((source) => {
-				// Escape citation-shaped text from documents so it cannot impersonate an answer citation.
+				// 文档正文自身的 [数字] 要转义，避免冒充本轮由服务端分配的引用编号。
 				const excerpt = source.text.slice(0, 600).replace(/\[(\d+)\]/g, "［$1］");
 				return `${excerpt}${source.text.length > 600 ? "…" : ""} [${source.number}]`;
 			}),

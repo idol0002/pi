@@ -1,3 +1,7 @@
+/**
+ * Node 与 Python 文档解析器之间的适配层。
+ * 输入原件字节，输出统一 ParsedDocument；管理临时文件、进度、超时、取消和结果校验。
+ */
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -40,6 +44,7 @@ export interface ParserOptions {
 export function createDocumentParser(
 	options: ParserOptions = {},
 ): (...args: Parameters<DocumentParser>) => Promise<ParsedDocument> {
+	// 此处读取的是解析配置，与问答模型/向量模型配置相互独立。
 	const python = (options.python ?? process.env.KNOWLEDGE_PYTHON_PATH)?.trim() || "python";
 	const timeoutMs = options.timeoutMs ?? Number(process.env.KNOWLEDGE_PARSE_TIMEOUT_MS || 300_000);
 	const maxPages = options.maxPages ?? Number(process.env.KNOWLEDGE_MAX_DOCUMENT_PAGES || 120);
@@ -57,8 +62,10 @@ export function createDocumentParser(
 		throw new Error("文档解析配置无效：时限为 1000–900000 ms，页数为 1–500，OCR 为 auto/always/off");
 	}
 	return async (content, mediaType, context) => {
+		// 小型文本直接走 TypeScript 解析；PDF/Word 才需要隔离的 Python 进程。
 		if (mediaType === "text/plain" || mediaType === "text/markdown") return parseTextDocument(content, mediaType);
 		context.signal.throwIfAborted();
+		// 每个任务单独建临时目录，确认它在预期根下；无论成功失败都在 finally 清理。
 		const temporaryRoot = resolve(tmpdir());
 		const directory = await mkdtemp(join(temporaryRoot, "company-document-"));
 		if (dirname(directory) !== temporaryRoot) throw new Error("Invalid parser temporary directory");
@@ -67,6 +74,7 @@ export function createDocumentParser(
 				mediaType === "application/pdf" ? "pdf" : mediaType === "application/msword" ? "doc" : "docx";
 			const input = join(directory, `source.${extension}`);
 			await writeFile(input, content);
+			// 参数逐项交给 spawn，不拼接 Shell 命令；上传者的文件名不参与进程命令构造。
 			const args = [
 				"-u",
 				fileURLToPath(new URL("../parser/parse_document.py", import.meta.url)),
@@ -100,6 +108,7 @@ export function createDocumentParser(
 				let failure: unknown;
 				let delivery = Promise.resolve();
 				const kill = () => {
+					// 解析器可能还启动 LibreOffice，因此需要结束进程树，而不只是父进程。
 					if (!child.pid || child.exitCode !== null) return;
 					if (process.platform === "win32") {
 						const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
@@ -128,6 +137,7 @@ export function createDocumentParser(
 				}, timeoutMs);
 				context.signal.addEventListener("abort", abort, { once: true });
 				if (context.signal.aborted) abort();
+				// stdout 是逐行 JSON 协议；一个 data 块可能只有半行，先缓冲到换行再处理。
 				child.stdout.setEncoding("utf8");
 				child.stdout.on("data", (data: string) => {
 					received += Buffer.byteLength(data);
@@ -162,6 +172,7 @@ export function createDocumentParser(
 									processedPages: Number(event.processedPages),
 									totalPages: Number(event.totalPages),
 								};
+								// 串行写入进度，保持顺序；进度持久化失败时也停止解析任务。
 								delivery = delivery
 									.then(() => context.progress(progress))
 									.catch((error: unknown) => {
@@ -179,7 +190,7 @@ export function createDocumentParser(
 						kill();
 					}
 				});
-				// Drain diagnostics without logging document text or local paths.
+				// 消费但不转发诊断输出，避免第三方异常把文档正文或本地路径带给用户。
 				child.stderr.resume();
 				child.on("error", () => {
 					failure = new ApiError(
@@ -200,6 +211,7 @@ export function createDocumentParser(
 				});
 			});
 			context.signal.throwIfAborted();
+			// 进程正常退出且收到 done 之后，仍需检查结果文件大小和全部结构。
 			const resultPath = join(directory, "result.json");
 			if ((await stat(resultPath)).size > 16 * 1024 * 1024)
 				throw new ApiError(422, "document_too_complex", "解析结果过大");
@@ -227,6 +239,7 @@ function shortText(value: unknown, limit: number): string {
 }
 
 export function decodeParsedDocument(value: unknown, maxPages = 120): ParsedDocument {
+	// 子进程输出也视为边界数据：验证页码、块 ID、坐标范围、置信度和数组上限。
 	try {
 		const result = record(value);
 		if (
@@ -330,6 +343,7 @@ export function composeParsedDocument(
 	pages: DocumentPage[],
 	warnings: ParseWarning[],
 ): ParsedDocument {
+	// 规范化后的 text 是行号/偏移的共同基准，人工复核后也复用此函数重新建立位置关系。
 	blocks = blocks.map((block) => ({ ...block, text: block.text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n") }));
 	const text = blocks.map((block) => block.text).join("\n\n");
 	if (Buffer.byteLength(text) > MAX_TEXT_BYTES)
@@ -340,6 +354,7 @@ export function composeParsedDocument(
 	let index = 0;
 	while (index < blocks.length) {
 		const group = [blocks[index++]];
+		// 同页同章节的普通段落可合并分块；表格保留独立边界，避免混到相邻正文里。
 		while (
 			index < blocks.length &&
 			blocks[index].location.page === group[0].location.page &&
@@ -350,6 +365,7 @@ export function composeParsedDocument(
 			group.push(blocks[index++]);
 		const body = group.map((block) => block.text).join("\n\n");
 		let position = 0;
+		// 保存每个原始正文块在合并文本中的区间，之后按区间交集把来源位置分配给检索块。
 		const spans = group.map((block) => {
 			const start = position;
 			position += block.text.length + 2;

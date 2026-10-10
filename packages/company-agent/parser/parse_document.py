@@ -1,5 +1,7 @@
 """Bounded, local document parser. stdout is a JSON-lines progress protocol."""
 
+# 学习导读：Node 的 document-parser.ts 启动本程序，读取 JSON 进度并在结束后加载 result.json。
+# 解析器只产生正文、位置和质量警告；是否发布为可检索版本，由 Node 业务层决定。
 import argparse
 import contextlib
 import io
@@ -53,6 +55,7 @@ def normalized_box(box, width, height):
 
 class Parser:
     def __init__(self, options):
+        # 三类结果分别供分块、原文预览和人工复核使用；不在这里连接业务数据库。
         self.options = options
         self.blocks = []
         self.pages = []
@@ -65,6 +68,7 @@ class Parser:
             self.warnings.append({"page": page, "code": code, "message": message})
 
     def block(self, text, page, box, method, label, kind="paragraph", heading=None, confidence=None):
+        # 所有格式最终都转换成同一种正文块，便于 Node 统一分块和关联来源。
         text = clean(text)
         if not text:
             return
@@ -79,6 +83,7 @@ class Parser:
         })
 
     def ocr(self, image, page, label, image_location=None):
+        # off 不代表图片已经被成功读取，需要给出警告，让后续版本进入人工复核。
         if self.options.ocr == "off":
             self.warning(page, "ocr_required", "检测到图片内容，启用本地 OCR 后重试，或核对原件并补充正文")
             return
@@ -91,13 +96,13 @@ class Parser:
         ink = np.asarray(image.convert("L")) < 160
         if int((ink.mean(axis=1) > 0.45).sum()) > 5 and int((ink.mean(axis=0) > 0.4).sum()) > 5:
             self.warning(page, "scan_table", "扫描图片可能包含表格，请核对行列对应关系")
-        # The bundled ONNX weights run locally; no model service receives page content.
+        # 使用随库提供的 ONNX 权重在本机推理；进度协议不能被 OCR 库的 stdout 日志打断。
         with contextlib.redirect_stdout(sys.stderr):
             if self.engine is None:
                 self.engine = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1, text_score=0.0)
             result, _ = self.engine(np.asarray(image.convert("RGB")), text_score=0.0)
             rotated = False
-            # The text-line classifier handles 180 degrees. Retry 90 degrees for sideways scans.
+            # 文本行分类器处理倒置；效果较差时再尝试 90 度旋转，改善横置扫描页的识别。
             score = sum(len(item[1]) * float(item[2]) for item in result or [])
             if not result or score / max(1, sum(len(item[1]) for item in result)) < 0.75:
                 alternative, _ = self.engine(np.asarray(image.rotate(90, expand=True).convert("RGB")), text_score=0.0)
@@ -113,7 +118,7 @@ class Parser:
             confidence = float(confidence)
             low_quality |= confidence < 0.85
             if rotated:
-                # PIL's CCW rotation: map detected boxes back to the original PDF page.
+                # 检测框要映射回原图坐标，前端才可在未旋转的 PDF 页面上高亮来源。
                 points = [[image.width - point[1], point[0]] for point in points]
             box = normalized_box(
                 [min(p[0] for p in points), min(p[1] for p in points),
@@ -121,6 +126,7 @@ class Parser:
                 image.width, image.height,
             )
             self.block(text, page, image_location or (box if page else None), "ocr", label, confidence=confidence)
+        # 阈值只是复核提示，不代表数学意义上的文本正确率。
         if low_quality:
             self.warning(page, "low_ocr_confidence", "部分文字识别置信度较低，请核对数字、名称和表格")
         if rotated:
@@ -129,6 +135,7 @@ class Parser:
             self.warning(None, "embedded_image", "Word 内嵌图片已识别，请核对其文字与正文的关系")
 
     def pdf(self, path):
+        # 文字提取与光栅渲染分别由专门库负责；按页决定哪条路径适合当前内容。
         try:
             document = pdfplumber.open(path, password="")
             raster = pdfium.PdfDocument(path)
@@ -146,6 +153,7 @@ class Parser:
                 text = page.extract_text() or ""
                 image_area = sum(max(0, item["x1"] - item["x0"]) * max(0, item["bottom"] - item["top"]) for item in page.images)
                 bad_text = "\ufffd" in text or "(cid:" in text
+                # 有页码文字的扫描页仍可能需要 OCR，不能仅凭“存在文字层”跳过图片正文。
                 needs_ocr = self.options.ocr == "always" or bad_text or image_area > width * height * 0.12
                 if not text.strip() and (page.images or page.curves or page.rects or page.lines):
                     needs_ocr = True
@@ -168,6 +176,7 @@ class Parser:
                     if len(page.lines) + len(page.rects) > 12:
                         self.warning(number, "scan_table", "扫描页可能包含表格，请核对行列对应关系")
                 elif text.strip():
+                    # 先抽表格，再排除落在表格区域内的普通文字行，避免正文重复。
                     tables = page.find_tables()
                     areas = [table.bbox for table in tables]
                     items = []
@@ -190,7 +199,7 @@ class Parser:
             raster.close()
 
     def docx(self, path):
-        # Inspect the archive before an OOXML library expands it. Never extract ZIP paths.
+        # DOCX 是 ZIP 容器；交给 OOXML 库前先检查总量与 XML，不把 ZIP 中的路径解压到磁盘。
         try:
             with zipfile.ZipFile(path) as archive:
                 entries = archive.infolist()
@@ -214,6 +223,7 @@ class Parser:
             raise ParseFailure("invalid_docx", "Word 文件无法读取，请检查格式或重新导出 DOCX") from error
         heading = None
         seen_images = set()
+        # DOCX 的显示分页依赖排版环境，用正文块标签定位，不编造稳定页码。
         for index, item in enumerate(document.iter_inner_content()):
             if index > MAX_BLOCKS:
                 raise ParseFailure("document_too_complex", "Word 段落过多，请拆分文档")
@@ -259,6 +269,7 @@ class Parser:
                 self.warning(None, "additional_content", "文档包含脚注、尾注或嵌入对象，请核对正文是否完整")
 
     def legacy_word(self, path, output):
+        # 老 DOC 先在独立配置目录内转换成 PDF，再复用 PDF 路径；转换后仍要求人工核对。
         executable = self.options.libreoffice
         if not executable or not Path(executable).is_file():
             raise ParseFailure("converter_unavailable", "旧版 DOC 需要配置 KNOWLEDGE_LIBREOFFICE_PATH，或先另存为 DOCX")
@@ -282,6 +293,7 @@ class Parser:
 
 
 def main():
+    # 命令行参数来自 Node。输出只有进度/终态与受限的 JSON 文件，原件不被改写。
     arguments = argparse.ArgumentParser()
     arguments.add_argument("--input", required=True)
     arguments.add_argument("--output", required=True)

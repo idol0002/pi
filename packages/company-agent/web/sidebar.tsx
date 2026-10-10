@@ -1,3 +1,7 @@
+/**
+ * 侧栏展示用户、知识范围和历史，并把操作交给父组件/useChat。
+ * 禁用控件是交互提示；会话所有权和知识库权限仍由服务端检查。
+ */
 import type { KnowledgeBase, User } from "../src/types.ts";
 import type { WorkspacePage } from "./types.ts";
 import type { ChatController } from "./use-chat.ts";

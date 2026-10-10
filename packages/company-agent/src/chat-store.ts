@@ -1,3 +1,7 @@
+/**
+ * 会话消息持久化与历史可见性：记录一轮开始/完成/失败，并维护答案使用过的全部来源。
+ * StoredMessage.evidence 只留在服务端用于下一轮上下文，公开消息通过 publicMessage 输出。
+ */
 import { randomUUID } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
 import type { AnswerEvidence } from "./answer-model.ts";
@@ -11,6 +15,7 @@ export interface StoredMessage extends ChatMessage {
 }
 
 async function requireConversation(database: SqlClient, userId: string, id: string): Promise<Conversation> {
+	// 会话必须属于本人，且创建时所选的每个知识库现在仍可访问。
 	const { rows } = await database.query<Conversation>(
 		`SELECT c.id, c.title, c.created_at AS "createdAt", c.updated_at AS "updatedAt",
 		        array_agg(k.knowledge_base_id ORDER BY k.knowledge_base_id) AS "knowledgeBaseIds"
@@ -30,6 +35,8 @@ async function requireConversation(database: SqlClient, userId: string, id: stri
 }
 
 async function requireEvidence(database: SqlClient, userId: string, evidence: AnswerEvidence[]): Promise<void> {
+	// 验证固定来源版本仍存在且有权限；是否为 current 版本由新检索/历史上下文选择另行约束。
+	// 因此仍有阅读权限的旧版引用可以回看，但不会无条件变成下一轮的当前依据。
 	if (evidence.length === 0) return;
 	const { rows } = await database.query<{ id: string }>(
 		`SELECT c.id FROM document_chunks c
@@ -58,6 +65,7 @@ export function publicSource(source: AnswerEvidence): AnswerSource {
 }
 
 export function publicMessage(message: StoredMessage): ChatMessage {
+	// 网页取得回答和可点击的来源元数据，不额外收到用于组织上下文的完整证据正文。
 	const { evidence: _evidence, ...visible } = message;
 	return visible;
 }
@@ -70,6 +78,7 @@ export class ChatStore {
 	}
 
 	async recoverInterrupted(): Promise<void> {
+		// 上次退出时未完成的内容不可作为已完成答案，也不自动重放外部模型请求。
 		await this.database.query(
 			"UPDATE messages SET status = 'error', content = '', error_code = 'interrupted' WHERE status = 'running'",
 		);
@@ -87,6 +96,7 @@ export class ChatStore {
 	}
 
 	begin(userId: string, conversationId: string, runId: string, question: string, model: string): Promise<string> {
+		// 一轮先插入用户问题和 running 助手占位，共用 runId；完成后更新同一助手消息。
 		return this.database.transaction(async (transaction) => {
 			await requireConversation(transaction, userId, conversationId);
 			const { rows } = await transaction.query<{ count: number; busy: boolean }>(
@@ -115,6 +125,7 @@ export class ChatStore {
 	}
 
 	history(userId: string, conversationId: string): Promise<StoredMessage[]> {
+		// 比较“原来关联的来源数”和“现在可读的来源数”，判断答案是否应被整体遮蔽。
 		return this.database.transaction(async (transaction) => {
 			await requireConversation(transaction, userId, conversationId);
 			const { rows } = await transaction.query<
@@ -143,6 +154,7 @@ export class ChatStore {
 			);
 			return rows.map(({ sourceCount, createdAt, ...message }) => {
 				const available = sources.rows.filter((source) => source.messageId === message.id);
+				// 不能只删除失效的引用按钮：答案正文也可能已经包含那份资料。
 				const redacted = sourceCount !== available.length;
 				const evidence = redacted
 					? []
@@ -182,6 +194,7 @@ export class ChatStore {
 		return this.database.transaction(async (transaction) => {
 			await requireConversation(transaction, userId, conversationId);
 			await requireEvidence(transaction, userId, evidence);
+			// 保存全部传入上下文的证据，并单独标记是否被显式引用，追踪间接依赖。
 			for (const source of evidence) {
 				await transaction.query(
 					`INSERT INTO message_sources (message_id, number, document_id, version_id, chunk_id, cited)
@@ -205,6 +218,7 @@ export class ChatStore {
 	}
 
 	async fail(messageId: string, status: Extract<MessageStatus, "error" | "cancelled">, code: string): Promise<void> {
+		// 只终结仍在 running 的消息，不用迟到的失败回调覆盖已经完成的记录。
 		await this.database.query(
 			"UPDATE messages SET content = '', status = $2, error_code = $3 WHERE id = $1 AND status = 'running'",
 			[messageId, status, code],

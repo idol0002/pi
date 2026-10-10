@@ -1,3 +1,7 @@
+/**
+ * 管理区控制器：知识库切换、文档轮询、上传/更新/重试/删除以及用户组授权。
+ * 页面数据与未提交表单分开维护，后台状态刷新不能覆盖管理员正在编辑的授权。
+ */
 import { useEffect, useRef, useState } from "react";
 import type {
 	IngestionJob,
@@ -23,6 +27,7 @@ interface ManagementProps {
 }
 
 export function ManagementPanel({ bases, ...props }: ManagementProps) {
+	// 当前知识库作为子组件 key，切换时重置其草稿并触发旧请求清理。
 	const [baseId, setBaseId] = useState(bases[0]?.id ?? "");
 	const [refresh, setRefresh] = useState(0);
 	const [busy, setBusy] = useState(false);
@@ -105,6 +110,7 @@ function KnowledgeBaseContent({
 
 	useEffect(
 		() => () => {
+			// 卸载时取消当前操作；仅隐藏管理区时，下面的 active 条件负责暂停轮询。
 			operation.current?.abort();
 			operation.current = undefined;
 			onBusyChange(false);
@@ -112,6 +118,7 @@ function KnowledgeBaseContent({
 		[onBusyChange],
 	);
 
+	// 文档有 queued/processing 状态才继续轮询；每次请求结束后再安排下一次，避免请求重叠。
 	// biome-ignore lint/correctness/useExhaustiveDependencies: Refresh counters and role changes invalidate the document list after mutations and reviews.
 	useEffect(() => {
 		if (!active) return;
@@ -146,6 +153,7 @@ function KnowledgeBaseContent({
 		};
 	}, [active, base.id, base.role, refresh, revision, documentRevision, onError]);
 
+	// 授权表单单独加载：文档进度轮询不能把用户尚未保存的授权选择重置掉。
 	// biome-ignore lint/correctness/useExhaustiveDependencies: Permission saves and manual refreshes must reload grants, while document polling preserves unsaved edits.
 	useEffect(() => {
 		if (!active || base.role !== "admin") return;
@@ -178,6 +186,7 @@ function KnowledgeBaseContent({
 	}, [active, base.id, base.role, refresh, grantRevision, onError]);
 
 	const begin = (kind: string) => {
+		// ref 即时占位，state 用于按钮/提示；旧请求不能清除后来操作的状态。
 		if (operation.current) return undefined;
 		const controller = new AbortController();
 		operation.current = controller;
@@ -194,6 +203,7 @@ function KnowledgeBaseContent({
 		}
 	};
 	const startUpdate = (document?: BrowserDocument) => {
+		// 修订号驱动 UploadForm 的 key，统一重置新建/更新/取消后的文件和标题。
 		setUpdateDocument(document);
 		setReceipt(undefined);
 		setUploadStatus("");
@@ -201,6 +211,7 @@ function KnowledgeBaseContent({
 	};
 	const documentAction = async (document: BrowserDocument, action: DocumentAction) => {
 		if (action === "open" || action === "review") {
+			// 正常预览用 current，复核用 latest；两者可能指向同一文档的不同版本。
 			onSource({
 				title: document.title,
 				path: `/api/documents/${encodeURIComponent(document.id)}/source?versionId=${encodeURIComponent(action === "review" ? document.latestVersionId : (document.currentVersionId ?? ""))}`,
@@ -273,6 +284,7 @@ function KnowledgeBaseContent({
 			const uploaded = (await response.json()) as UploadReceipt;
 			if (controller.signal.aborted) return;
 			startUpdate();
+			// 202 回执只说明接受上传；之后靠文档轮询判断 ready、needs_review 或 failed。
 			setReceipt(uploaded);
 			setUploadStatus("上传成功，正在处理。文档列表将自动更新。");
 			setDocumentRevision((value) => value + 1);
@@ -286,6 +298,7 @@ function KnowledgeBaseContent({
 		}
 	};
 	const saveGrants = async () => {
+		// 保存后重新取得自己的知识库列表，因为本次修改也可能降低/撤销自己的访问范围。
 		if (!groups) return;
 		const controller = begin("grants");
 		if (!controller) return;

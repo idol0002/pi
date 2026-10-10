@@ -1,3 +1,7 @@
+/**
+ * 向量索引生命周期：扫描已发布分块、批量向量化、按配置版本写入，再按当前用户权限查询。
+ * 文档/关键词发布不等待这里完成；RetrievalService 会检查覆盖情况并解释索引未齐的状态。
+ */
 import type { PGlite } from "@electric-sql/pglite";
 import { chunkColumns, withSourceUrl } from "./documents.ts";
 import type { EmbeddingModel } from "./embeddings.ts";
@@ -5,7 +9,7 @@ import { ApiError, notFound } from "./errors.ts";
 import { accessibleKnowledgeBases, documentAccess } from "./store.ts";
 import type { DocumentChunk, SearchHit } from "./types.ts";
 
-/** One background indexer per local database. Published chunks are its durable work queue. */
+/** 每个本地数据库一个索引器；已发布但缺少当前 profile 向量的分块就是持久化待办队列。 */
 export class VectorIndex {
 	readonly model: EmbeddingModel;
 	private readonly database: PGlite;
@@ -29,6 +33,7 @@ export class VectorIndex {
 	}
 
 	wake(): void {
+		// 同一时刻只跑一轮扫描；配置错误暂停，暂时错误退避，避免持续重复发送同一批资料。
 		if (!this.running || this.active || this.paused) return;
 		clearTimeout(this.timer);
 		const controller = new AbortController();
@@ -74,6 +79,7 @@ export class VectorIndex {
 	}
 
 	async indexPending(signal: AbortSignal): Promise<void> {
+		// 后台为有效知识库的已发布资料建索引；查询时才按具体员工过滤，索引存在不代表有权读取。
 		while (!signal.aborted) {
 			const { rows } = await this.database.query<{
 				id: string;
@@ -90,6 +96,7 @@ export class VectorIndex {
 				[this.model.profileId],
 			);
 			if (rows.length === 0) return;
+			// 网络调用放在写事务之外，避免持有数据库事务等待较慢的外部服务。
 			const vectors = await this.model.embed(
 				rows.map((row) => `${row.title}\n${(row.heading ?? "").slice(0, 400)}\n${row.text}`),
 				signal,
@@ -110,7 +117,7 @@ export class VectorIndex {
 						"embedding_dimensions_changed",
 						"向量维度发生变化，请更新模型配置版本后重新建立索引",
 					);
-				// A document may have been replaced or deleted while the provider was processing.
+				// 服务返回时版本可能已替换或删除，写入前重新连接 current/ready/未删除条件。
 				await transaction.query(
 					`INSERT INTO chunk_embeddings (chunk_id, profile_id, embedding)
 					 SELECT c.id, $1, x.embedding::vector
@@ -131,6 +138,7 @@ export class VectorIndex {
 	}
 
 	async coverage(userId: string, ids: string[] | null): Promise<{ total: number; indexed: number; failure?: string }> {
+		// 覆盖率只统计当前员工可见的当前版本，不能让无关知识库影响本次就绪判断。
 		if (ids && (await accessibleKnowledgeBases(this.database, userId, ids)).length !== ids.length) throw notFound();
 		const result = await this.database.query<{ total: number; indexed: number }>(
 			`WITH allowed AS (SELECT d.id, d.current_version_id ${documentAccess} AND ($2::text[] IS NULL OR k.id = ANY($2::text[])))
@@ -145,6 +153,7 @@ export class VectorIndex {
 	}
 
 	async search(userId: string, ids: string[] | null, query: string, signal: AbortSignal): Promise<SearchHit[]> {
+		// 先验证范围，再向量化问题；返回后 SQL 仍按实时权限筛选候选。
 		if (ids && (await accessibleKnowledgeBases(this.database, userId, ids)).length !== ids.length) throw notFound();
 		const [embedding] = await this.model.embed([query], signal);
 		const profile = await this.database.query<{ dimensions: number }>(
@@ -155,6 +164,7 @@ export class VectorIndex {
 			throw new ApiError(503, "embedding_dimensions_changed", "语义索引与当前向量模型不一致，请重新建立索引");
 		}
 		signal.throwIfAborted();
+		// <=> 是余弦距离，1 - 距离作为相似度；当前执行精确排序，未使用近似向量索引。
 		const { rows } = await this.database.query<{ hit: Omit<DocumentChunk, "sourceUrl">; score: number }>(
 			`WITH allowed AS MATERIALIZED (
 			   SELECT d.id, d.knowledge_base_id, d.current_version_id ${documentAccess}

@@ -1,8 +1,13 @@
+/**
+ * 检索结果后处理：业务关键词重排、重复摘录去除和双路排名融合。
+ * 这里不负责授权，输入候选必须来自前面带权限条件的检索查询。
+ */
 import type { SearchPlan } from "./search-query.ts";
 import { searchTerms } from "./text-processing.ts";
 import type { SearchHit } from "./types.ts";
 
 export function rankKeywordHits(hits: SearchHit[], plan: SearchPlan): SearchHit[] {
+	// 词覆盖率、标题、章节和追问意图等是启发式信号，不能把分数解释成正确概率。
 	if (plan.terms.length === 0) return [];
 	const ranked: SearchHit[] = [];
 	for (const hit of hits) {
@@ -18,7 +23,7 @@ export function rankKeywordHits(hits: SearchHit[], plan: SearchPlan): SearchHit[
 		const coverage = matched.length / plan.terms.length;
 		const intentMatches = Math.min(3, plan.expandedTerms.filter((term) => fullTerms.has(term)).length);
 		const anchoredIntent = plan.contextual && plan.contextDocumentIds.includes(hit.documentId) && intentMatches > 0;
-		// Long questions often contain background prose. Require at least two useful terms.
+		// 长问题可能有大量背景词，要求至少两个有效匹配；短问题则检查覆盖比例。
 		if (!anchoredIntent && (matched.length === 0 || (plan.terms.length > 8 ? matched.length < 2 : coverage < 0.4)))
 			continue;
 		const score =
@@ -33,7 +38,7 @@ export function rankKeywordHits(hits: SearchHit[], plan: SearchPlan): SearchHit[
 	return ranked.sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
 }
 
-/** Deduplicate repeated excerpts; reserve room for other documents before filling remaining slots. */
+/** 按规范化后的相同正文去重，先给不同文档留出空间，再用延后候选补足名额。 */
 export function selectSources(hits: SearchHit[], limit: number): SearchHit[] {
 	const seen = new Set<string>();
 	const unique = hits.filter((hit) => {
@@ -59,6 +64,8 @@ export function selectSources(hits: SearchHit[], limit: number): SearchHit[] {
 }
 
 export function fuseRanks(keyword: SearchHit[], semantic: SearchHit[], limit: number): SearchHit[] {
+	// RRF 按名次而不是原始分数融合：两路分数尺度不同，当前每路贡献为 1 / (40 + 排名)。
+	// 同一片段同时出现在两路时累加贡献，然后再做文档多样性选择。
 	const merged = new Map<string, SearchHit>();
 	for (const list of [keyword, semantic]) {
 		for (const [index, hit] of list.entries()) {

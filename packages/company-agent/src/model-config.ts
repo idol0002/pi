@@ -1,3 +1,7 @@
+/**
+ * 把服务端环境配置转换成 Pi 可使用的模型描述。
+ * 默认 demo；显式选择真实接口却缺少配置时直接报错，不把故障悄悄变成演示回答。
+ */
 import type { Model } from "@earendil-works/pi-ai";
 
 export interface ModelConfig {
@@ -8,10 +12,12 @@ export interface ModelConfig {
 }
 
 export function readModelConfig(env: Record<string, string | undefined> = process.env): ModelConfig {
+	// 通过参数传入 env，测试就能验证配置行为而不依赖开发者机器上的真实密钥。
 	const mode = env.KNOWLEDGE_MODEL_MODE?.trim() || "demo";
 	if (mode !== "demo" && mode !== "openai") throw new Error("KNOWLEDGE_MODEL_MODE 必须是 demo 或 openai");
 	const timeoutMs = integerSetting(env, "KNOWLEDGE_MODEL_TIMEOUT_MS", 60_000, 1000, 180_000);
 	const maxTokens = integerSetting(env, "KNOWLEDGE_MODEL_MAX_TOKENS", 2048, 128, 8192);
+	// 兼容接口对输出上限字段和流式 usage 的支持不同，需分别配置。
 	const maxTokensField = env.KNOWLEDGE_MODEL_MAX_TOKENS_FIELD?.trim() || "max_tokens";
 	if (maxTokensField !== "max_tokens" && maxTokensField !== "max_completion_tokens") {
 		throw new Error("KNOWLEDGE_MODEL_MAX_TOKENS_FIELD 必须是 max_tokens 或 max_completion_tokens");
@@ -48,6 +54,7 @@ export function readModelConfig(env: Record<string, string | undefined> = proces
 		mode,
 		apiKey,
 		timeoutMs,
+		// 这里描述 API 能力；网页只能看到 AnswerModel.info，不会取得 apiKey 或接口地址。
 		model: {
 			id: mode === "demo" ? "knowledge-demo" : name,
 			name,
@@ -58,6 +65,7 @@ export function readModelConfig(env: Record<string, string | undefined> = proces
 			input: ["text"],
 			contextWindow: 32_768,
 			maxTokens,
+			// 未配置真实价格；零值不能被解读为供应商调用免费。
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			compat: {
 				supportsStore: false,

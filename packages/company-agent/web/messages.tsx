@@ -1,3 +1,7 @@
+/**
+ * 单条消息渲染：处理中显示增量，完成后把合法编号映射成来源链接，失效/失败时显示提示。
+ * 正文始终作为 React 文本节点，不把模型或文档内容执行为 HTML。
+ */
 import type { ReactNode } from "react";
 import type { AnswerSource, ChatMessage } from "../src/types.ts";
 import { sourcePath } from "./client.ts";
@@ -22,12 +26,14 @@ export function Message({ message, question, streaming, busy, onRetry, onSource 
 			meta: `版本 ${source.version} · ${locationLabel(source.locations, source.startLine, source.endLine)}${source.heading ? ` · ${source.heading}` : ""}`,
 		});
 	let content: ReactNode = message.content;
+	// 后端标记 redacted 时不继续显示旧正文或来源，避免只隐藏链接却保留敏感答案。
 	if (message.redacted) content = "这条回答所用资料已删除或权限发生变化，内容已隐藏。";
 	else if (message.status === "running") content = streaming && message.content ? message.content : "回答进行中…";
 	else if (message.status !== "complete")
 		content = message.status === "cancelled" ? "已停止生成。" : "这次回答未完成，请重试。";
 	else {
 		const parts: ReactNode[] = [];
+		// 只把服务器返回来源表里确实存在的 [编号] 转成受控链接，其余内容保持普通文本。
 		let offset = 0;
 		for (const match of message.content.matchAll(/\[(\d+)\]/g)) {
 			const source = message.sources.find((item) => item.number === Number(match[1]));

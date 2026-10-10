@@ -1,3 +1,7 @@
+/**
+ * 上传表单保存 File 与可选标题；父组件负责校验、请求和任务状态。
+ * 父组件改变 key 时会重新挂载，清空文件输入与旧草稿，不手动修改浏览器文件路径。
+ */
 import { useEffect, useRef, useState } from "react";
 import type { BrowserDocument } from "./types.ts";
 
