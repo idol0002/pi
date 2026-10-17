@@ -99,6 +99,12 @@ export function Message({ message, question, streaming, busy, onRetry, onSource 
 						{message.usage ? `已完成 · ${message.usage.totalTokens} tokens` : "已完成"}
 					</p>
 					{message.retrieval?.note && <p className="message-status">{message.retrieval.note}</p>}
+					{message.agent && (
+						<p className="message-status">
+							已结合 {message.agent.restoredTurns} 轮历史 · 资料查阅{" "}
+							{message.agent.steps.filter((step) => step.status === "complete").length} 次
+						</p>
+					)}
 				</>
 			)}
 			{failed && (

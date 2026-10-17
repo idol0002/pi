@@ -3,15 +3,26 @@
  * StoredMessage.evidence 只留在服务端用于下一轮上下文，公开消息通过 publicMessage 输出。
  */
 import { randomUUID } from "node:crypto";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { PGlite } from "@electric-sql/pglite";
 import type { AnswerEvidence } from "./answer-model.ts";
 import type { SqlClient } from "./database.ts";
 import { ApiError, notFound } from "./errors.ts";
 import { accessibleKnowledgeBases, documentAccess } from "./store.ts";
-import type { AnswerSource, ChatMessage, Conversation, MessageStatus, ModelUsage, RetrievalInfo } from "./types.ts";
+import type {
+	AgentExecution,
+	AnswerSource,
+	ChatMessage,
+	Conversation,
+	MessageStatus,
+	ModelUsage,
+	RetrievalInfo,
+} from "./types.ts";
 
 export interface StoredMessage extends ChatMessage {
 	evidence: AnswerEvidence[];
+	/** 内部执行轨迹；公开历史只返回回答、来源和执行摘要。 */
+	transcript?: AgentMessage[];
 }
 
 async function requireConversation(database: SqlClient, userId: string, id: string): Promise<Conversation> {
@@ -66,7 +77,7 @@ export function publicSource(source: AnswerEvidence): AnswerSource {
 
 export function publicMessage(message: StoredMessage): ChatMessage {
 	// 网页取得回答和可点击的来源元数据，不额外收到用于组织上下文的完整证据正文。
-	const { evidence: _evidence, ...visible } = message;
+	const { evidence: _evidence, transcript: _transcript, ...visible } = message;
 	return visible;
 }
 
@@ -129,12 +140,17 @@ export class ChatStore {
 		return this.database.transaction(async (transaction) => {
 			await requireConversation(transaction, userId, conversationId);
 			const { rows } = await transaction.query<
-				Omit<ChatMessage, "createdAt" | "redacted" | "sources"> & { createdAt: Date; sourceCount: number }
+				Omit<ChatMessage, "createdAt" | "redacted" | "sources"> & {
+					createdAt: Date;
+					sourceCount: number;
+					transcript: AgentMessage[] | null;
+				}
 			>(
 				`SELECT m.id, m.run_id AS "runId", m.role, m.content, m.status, m.model, m.usage,
-				        m.error_code AS "errorCode", m.created_at AS "createdAt", m.retrieval,
+				        m.error_code AS "errorCode", m.created_at AS "createdAt", m.retrieval, m.agent, t.transcript,
 				        (SELECT count(*)::int FROM message_sources s WHERE s.message_id = m.id) AS "sourceCount"
-				 FROM messages m WHERE m.conversation_id = $1 ORDER BY m.position`,
+				 FROM messages m LEFT JOIN agent_transcripts t ON t.message_id = m.id
+				 WHERE m.conversation_id = $1 ORDER BY m.position`,
 				[conversationId],
 			);
 			const sources = await transaction.query<
@@ -170,6 +186,8 @@ export class ChatStore {
 					...message,
 					content: redacted ? "" : message.content,
 					retrieval: redacted ? null : message.retrieval,
+					agent: redacted ? null : message.agent,
+					transcript: redacted ? undefined : (message.transcript ?? undefined),
 					createdAt: createdAt.toISOString(),
 					redacted,
 					evidence,
@@ -190,6 +208,8 @@ export class ChatStore {
 		evidence: AnswerEvidence[],
 		cited: Set<number>,
 		retrieval?: RetrievalInfo,
+		agent?: AgentExecution,
+		transcript?: AgentMessage[],
 	): Promise<void> {
 		return this.database.transaction(async (transaction) => {
 			await requireConversation(transaction, userId, conversationId);
@@ -202,13 +222,23 @@ export class ChatStore {
 					[messageId, source.number, source.documentId, source.versionId, source.id, cited.has(source.number)],
 				);
 			}
+			if (transcript) {
+				const serialized = JSON.stringify(transcript);
+				if (serialized.length > 160_000)
+					throw new ApiError(413, "agent_trace_limit", "本次执行记录过大，请缩小问题范围");
+				await transaction.query("INSERT INTO agent_transcripts (message_id, transcript) VALUES ($1, $2)", [
+					messageId,
+					serialized,
+				]);
+			}
 			await transaction.query(
-				"UPDATE messages SET content = $2, usage = $3, retrieval = $4, status = 'complete' WHERE id = $1 AND status = 'running'",
+				"UPDATE messages SET content = $2, usage = $3, retrieval = $4, agent = $5, status = 'complete' WHERE id = $1 AND status = 'running'",
 				[
 					messageId,
 					content,
 					usage === null ? null : JSON.stringify(usage),
 					retrieval ? JSON.stringify(retrieval) : null,
+					agent ? JSON.stringify(agent) : null,
 				],
 			);
 			await transaction.query("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [

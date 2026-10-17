@@ -101,6 +101,7 @@ it("persists data and never restores bootstrap permissions or passwords on resta
 				{ version: 3 },
 				{ version: 4 },
 				{ version: 5 },
+				{ version: 6 },
 			]);
 		} finally {
 			await reopened.close();

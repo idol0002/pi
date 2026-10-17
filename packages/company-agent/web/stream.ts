@@ -26,9 +26,16 @@ export async function readChatStream(response: Response, onEvent: (event: ChatEv
 			// 心跳注释等不含 data 的帧不进入业务回调。
 			if (!data) continue;
 			const event = JSON.parse(data) as ChatEvent;
-			if (!event || !["start", "status", "delta", "sources", "done", "error"].includes(event.type)) {
+			if (!event || !["start", "status", "agent", "delta", "sources", "done", "error"].includes(event.type)) {
 				throw new Error("回答流格式无效");
 			}
+			if (
+				event.type === "agent" &&
+				(!["context", "tool_start", "tool_end"].includes(event.phase) ||
+					typeof event.note !== "string" ||
+					event.note.length > 300)
+			)
+				throw new Error("回答流格式无效");
 			if (finished) throw new Error("回答结束后收到额外事件");
 			onEvent(event);
 			if (event.type === "done" || event.type === "error") finished = true;

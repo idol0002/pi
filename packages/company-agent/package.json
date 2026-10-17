@@ -7,7 +7,7 @@
 	"scripts": {
 		"start": "node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env src/main.ts",
 		"dev": "node --watch --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env src/main.ts",
-		"test:api": "node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env --test --test-concurrency=1 test/server.test.ts test/database.test.ts test/documents.test.ts test/documents-rich.test.ts test/document-parser.test.ts test/text-processing.test.ts test/chat.test.ts test/model.test.ts test/web.test.ts test/embeddings.test.ts test/retrieval.test.ts",
+		"test:api": "node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env --test --test-concurrency=1 test/server.test.ts test/database.test.ts test/documents.test.ts test/documents-rich.test.ts test/document-parser.test.ts test/text-processing.test.ts test/chat.test.ts test/agent.test.ts test/model.test.ts test/web.test.ts test/embeddings.test.ts test/retrieval.test.ts",
 		"eval:retrieval": "node --import ../coding-agent/src/experimental/source-resolver.ts --env-file-if-exists=.env src/evaluate-retrieval.ts",
 		"typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.web.json",
 		"lint": "biome check src test web"
@@ -23,7 +23,8 @@
 		"esbuild": "0.28.2",
 		"pdfjs-dist": "6.4.299",
 		"react": "19.3.0",
-		"react-dom": "19.3.0"
+		"react-dom": "19.3.0",
+		"typebox": "1.3.27"
 	},
 	"devDependencies": {
 		"@types/react": "19.3.0",

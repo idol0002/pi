@@ -48,6 +48,9 @@ it("serves a fixed asset allowlist with a self-contained React bundle and local 
 it("decodes fragmented UTF-8 and CRLF SSE frames without losing citations or terminal state", async () => {
 	const expected: ChatEvent[] = [
 		{ type: "start", runId: "run", messageId: "message" },
+		{ type: "agent", phase: "context", note: "已载入有效历史" },
+		{ type: "agent", phase: "tool_start", note: "正在查找会话历史" },
+		{ type: "agent", phase: "tool_end", note: "资料已返回" },
 		{ type: "delta", text: "发布窗口。[1]" },
 		{ type: "done", message },
 	];
@@ -80,6 +83,10 @@ it("treats truncated or malformed streams as failures and accepts explicit serve
 	await assert.rejects(readChatStream(new Response("data: invalid\n\n", { headers }), () => {}));
 	await assert.rejects(
 		readChatStream(new Response('data: {"type":"unknown"}\n\n', { headers }), () => {}),
+		/格式无效/,
+	);
+	await assert.rejects(
+		readChatStream(new Response('data: {"type":"agent","phase":"invented","note":5}\n\n', { headers }), () => {}),
 		/格式无效/,
 	);
 	const event: ChatEvent = { type: "error", code: "cancelled", message: "已停止生成", messageId: "message" };

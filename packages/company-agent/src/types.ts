@@ -232,6 +232,21 @@ export interface ModelUsage {
 	totalTokens: number;
 }
 
+export type KnowledgeToolName = "knowledge_search" | "knowledge_read" | "conversation_recall";
+
+/** 只公开执行摘要，不将模型原始工具参数或工具正文直接发送到页面。 */
+export interface AgentExecution {
+	providerTurns: number;
+	toolCalls: number;
+	restoredTurns: number;
+	steps: { tool: string; status: "complete" | "error" }[];
+}
+
+export interface AgentProgress {
+	phase: "context" | "tool_start" | "tool_end";
+	note: string;
+}
+
 export interface ChatMessage {
 	id: string;
 	runId: string;
@@ -245,6 +260,7 @@ export interface ChatMessage {
 	sources: AnswerSource[];
 	createdAt: string;
 	retrieval?: RetrievalInfo | null;
+	agent?: AgentExecution | null;
 }
 
 export interface ModelInfo {
@@ -262,6 +278,7 @@ export interface UserGroup {
 export type ChatEvent =
 	| { type: "start"; runId: string; messageId: string }
 	| { type: "status"; stage: "retrieving" | "answering"; sourceCount?: number; note?: string }
+	| ({ type: "agent" } & AgentProgress)
 	| { type: "delta"; text: string }
 	| { type: "sources"; sources: AnswerSource[] }
 	| { type: "done"; message: ChatMessage }

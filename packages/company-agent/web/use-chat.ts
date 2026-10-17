@@ -185,6 +185,7 @@ export function useChat({ bases, initialConversations, notify, onError, onNaviga
 			await readChatStream(response, (event) => {
 				if (session !== epoch.current || generationRef.current !== generation) return;
 				if (event.type === "start") generation.runId = event.runId;
+				if (event.type === "agent" && !generation.stopping) setStage(event.note);
 				if (event.type === "status" && !generation.stopping)
 					setStage(
 						event.stage === "retrieving"

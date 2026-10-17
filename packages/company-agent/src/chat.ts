@@ -3,18 +3,18 @@
  * conversationId 标识会话，runId 标识一轮生成，messageId 标识该轮助手消息。
  * 浏览器通过 server.ts 的 SSE 接收本文件发出的 ChatEvent。
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
-import type { AnswerEvidence, AnswerInput, AnswerModel } from "./answer-model.ts";
-import { ChatStore, publicMessage, type StoredMessage } from "./chat-store.ts";
+import type { AnswerEvidence, AnswerModel } from "./answer-model.ts";
+import { ChatStore, publicMessage } from "./chat-store.ts";
+import { restoreHistory } from "./conversation-context.ts";
 import { ApiError, notFound } from "./errors.ts";
+import { createKnowledgeTools } from "./knowledge-tools.ts";
 import { RetrievalService } from "./retrieval.ts";
 import { planSearch } from "./search-query.ts";
 import type { ChatEvent, ModelInfo, SearchResult } from "./types.ts";
 
 const MAX_ANSWER_LENGTH = 24_000;
-const MAX_EVIDENCE_LENGTH = 12_000;
-const MAX_EVIDENCE_COUNT = 10;
 const NO_EVIDENCE = "未在所选知识库中找到可用依据。请补充相关文档或换一种问法。";
 
 interface ActiveRun {
@@ -150,8 +150,8 @@ export class ChatService {
 					const hits = retrieval.hits;
 					// 编号由服务端分配，模型只引用编号，不自行决定文档 URL。
 					evidence = hits.map((source, index) => ({ ...source, number: index + 1, current: true }));
-					// addHistory 会同时向 evidence 追加合法历史来源；最终依据不只看本次 hits 是否为空。
-					const history = hits.length > 0 || plan.contextual ? addHistory(previous, evidence) : [];
+					// 按容量恢复合法历史，引用同步映射到本轮；不是固定只取两轮。
+					const history = hits.length > 0 || plan.contextual ? restoreHistory(previous, evidence) : [];
 					await checkAccess();
 					await emit({ type: "status", stage: "answering", sourceCount: evidence.length, note: retrieval.note });
 					let result: Awaited<ReturnType<AnswerModel["generate"]>>;
@@ -166,6 +166,24 @@ export class ChatService {
 								question,
 								history,
 								evidence,
+								tools: createKnowledgeTools({
+									userId,
+									conversationId,
+									runId: active.id,
+									knowledgeBaseIds: conversation.knowledgeBaseIds,
+									evidence,
+									store: this.store,
+									retrieval: this.retrieval,
+									verifyAccess: checkAccess,
+								}),
+								sessionId: createHash("sha256")
+									.update(userId + ":" + conversationId)
+									.digest("hex"),
+								verifyAccess: checkAccess,
+								onProgress: async (progress) => {
+									await checkAccess();
+									await emit({ type: "agent", ...progress });
+								},
 								signal,
 								onText: async (text) => {
 									// 增量是待最终校验的正文；持续检查长度、取消状态和当前权限。
@@ -201,6 +219,8 @@ export class ChatService {
 							semanticCandidates: retrieval.semanticCandidates,
 							note: retrieval.note,
 						},
+						result.agent,
+						result.transcript,
 					);
 					await checkAccess();
 					// 保存之后再按当前可见性读取，避免把刚被撤权的答案作为成功终态交给浏览器。
@@ -241,48 +261,6 @@ export class ChatService {
 			run.controller.abort(new ApiError(499, "cancelled", "服务关闭，已停止生成"));
 		await Promise.all([...this.runs.values()].map((run) => run.finished));
 	}
-}
-
-function addHistory(messages: StoredMessage[], evidence: AnswerEvidence[]): AnswerInput["history"] {
-	// 优先尝试最近两轮，预算同时约束证据条数、证据正文和历史对话长度。
-	// evidence 是本轮共享数组：补入历史来源后，原答案中的引用编号要映射到新编号。
-	const history: AnswerInput["history"] = [];
-	let size = evidence.reduce((total, source) => total + source.text.length, 0);
-	let historySize = 0;
-	for (const answer of messages
-		.filter((message) => message.role === "assistant")
-		.slice(-2)
-		.reverse()) {
-		const question = messages.find((message) => message.role === "user" && message.runId === answer.runId);
-		if (
-			!question ||
-			answer.status !== "complete" ||
-			answer.redacted ||
-			answer.evidence.length === 0 ||
-			answer.evidence.some((source) => !source.current)
-		)
-			continue;
-		const additions = answer.evidence.filter((source) => !evidence.some((item) => item.id === source.id));
-		const addedSize = additions.reduce((total, source) => total + source.text.length, 0);
-		const pairSize = question.content.length + answer.content.length;
-		if (
-			evidence.length + additions.length > MAX_EVIDENCE_COUNT ||
-			size + addedSize > MAX_EVIDENCE_LENGTH ||
-			historySize + pairSize > 6000
-		)
-			continue;
-		for (const source of additions) evidence.push({ ...source, number: evidence.length + 1 });
-		size += addedSize;
-		historySize += pairSize;
-		// 相同文档片段用 ID 对齐，不能假设旧回答的 [1] 仍是新上下文的第一个来源。
-		const content = answer.content.replace(/\[(\d+)\]/g, (_match, oldNumber: string) => {
-			const old = answer.evidence.find((source) => source.number === Number(oldNumber));
-			const current = evidence.find((source) => source.id === old?.id);
-			return current ? `[${current.number}]` : "";
-		});
-		history.unshift({ question: question.content, answer: content });
-	}
-	return history;
 }
 
 function validateCitations(content: string, count: number): Set<number> {

@@ -159,8 +159,8 @@ describe("grounded knowledge chat", { concurrency: false }, () => {
 		assert.equal(root.status, 200);
 		assert.match(root.headers.get("content-security-policy") ?? "", /script-src 'self'/);
 		assert.match(root.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
-		assert.match(await root.text(), /id="question-form"/);
-		for (const name of ["app.ts", "client.ts", "stream.ts", "styles.css"]) {
+		assert.match(await root.text(), /id="root"/);
+		for (const name of ["app.js", "styles.css"]) {
 			const asset = await request(`/assets/${name}`, "GET", undefined, "");
 			assert.equal(asset.status, 200);
 			await asset.text();

@@ -218,4 +218,15 @@ export const migrations: readonly Migration[] = [
 			ALTER TABLE messages ADD COLUMN retrieval JSONB;
 		`,
 	},
+	// v6：保存本轮 Pi 消息/工具轨迹。原始轨迹只在服务端使用，网页只取得经过权限过滤的摘要。
+	{
+		version: 6,
+		sql: `
+			ALTER TABLE messages ADD COLUMN agent JSONB;
+			CREATE TABLE agent_transcripts (
+				message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+				transcript JSONB NOT NULL CHECK (jsonb_typeof(transcript) = 'array')
+			);
+		`,
+	},
 ];
